@@ -125,6 +125,28 @@ class Helpers(unittest.TestCase):
         self.assertEqual(b.fmt_ride_date(b.ical_start(evs[0])), "2026-11-21 09:45")
         self.assertIsNone(b.ical_start(evs[1]))   # all-day entries have no start time
 
+    def test_ical_weekly_repeat_is_expanded(self):
+        ev = b.parse_ical("BEGIN:VEVENT\r\nDTSTART;TZID=America/Denver:20260106T180000\r\n"
+                          "RRULE:FREQ=WEEKLY;BYDAY=TU,TH\r\nEXDATE;TZID=America/Denver:20261119T180000\r\n"
+                          "SUMMARY:Tuesday/Thursday Ride\r\nEND:VEVENT")[0]
+        got = [b.fmt_ride_date(d) for d in b.ical_occurrences(ev, dt.date(2026, 11, 17), dt.date(2026, 11, 23))]
+        self.assertEqual(got, ["2026-11-17 18:00"])            # Thursday the 19th is excluded by EXDATE
+        ev["RRULE"] = "FREQ=WEEKLY;INTERVAL=2"                  # every other Tuesday from Jan 6
+        got = [b.fmt_ride_date(d) for d in b.ical_occurrences(ev, dt.date(2026, 11, 17), dt.date(2026, 11, 30))]
+        self.assertEqual(got, ["2026-11-24 18:00"])
+        stale = dict(ev, DTSTART="20211118T111500", RRULE="FREQ=WEEKLY;BYDAY=TU,TH")
+        stale.pop("EXDATE")                                     # untouched since 2021: not shown as current
+        self.assertEqual(b.ical_occurrences(stale, dt.date(2026, 11, 17), dt.date(2026, 11, 23)), [])
+        broken = dict(ev, DTSTART="19700101T000000", RRULE="FREQ=WEEKLY")
+        self.assertEqual(b.ical_occurrences(broken, dt.date(2026, 11, 17), dt.date(2026, 11, 23)), [])
+        ev["RRULE"] = "FREQ=WEEKLY;UNTIL=20260601T000000Z"      # series already ended
+        self.assertEqual(b.ical_occurrences(ev, dt.date(2026, 11, 17), dt.date(2026, 11, 23)), [])
+
+    def test_title_ok(self):
+        self.assertTrue(b.title_ok({"title_match": "^RIDE"}, "RIDE: Thursday social"))
+        self.assertFalse(b.title_ok({"title_match": "^RIDE"}, "TRAIL BUILDING: Heil"))
+        self.assertTrue(b.title_ok({}, "anything"))
+
     def test_find_venue(self):
         data = {"props": {"a": [{"venue": {"name": "Park", "lat": 39.7, "lng": -105.2, "address": "1 Main"}}]}}
         self.assertEqual(b._find_venue(data)["name"], "Park")

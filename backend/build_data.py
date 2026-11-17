@@ -604,6 +604,57 @@ NOT_A_RIDE = re.compile(
 IS_A_RIDE = re.compile(r"\b(ride|rides|riding|mtb|gravel|cycling|bike|spin|climb|loop|century|paceline)\b", re.I)
 
 
+def title_ok(club, title):
+    """Optional per-source filter, e.g. "title_match": "^RIDE:" for calendars that label their rides."""
+    pat = club.get("title_match")
+    return not pat or bool(re.search(pat, title or "", re.I))
+
+
+WEEKDAYS_ICAL = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+
+
+def ical_occurrences(ev, first, last):
+    """
+    Start times of an iCal event inside [first, last]. One-off events give at most one;
+    weekly repeating events (RRULE:FREQ=WEEKLY, with BYDAY / INTERVAL / UNTIL / EXDATE) are
+    expanded. Other repeat rules are not expanded: only their first date is used.
+    """
+    start = ical_start(ev)
+    if not start or start.year < 2005:   # placeholder/corrupt start dates (e.g. 1970-01-01)
+        return []
+    rule = dict(kv.split("=", 1) for kv in (ev.get("RRULE") or "").split(";") if "=" in kv)
+    if rule.get("FREQ") != "WEEKLY":
+        return [start] if first <= start.date() <= last else []
+    if "COUNT" in rule:   # a fixed number of repeats: too easy to get wrong, use the first date only
+        return [start] if first <= start.date() <= last else []
+    # An open-ended weekly series that nobody has touched in over a year may well be dead:
+    # do not present it as a current ride.
+    touched = start.date()
+    m = re.match(r"(\d{8})", ev.get("LAST-MODIFIED", "") or "")
+    if m:
+        touched = max(touched, dt.datetime.strptime(m.group(1), "%Y%m%d").date())
+    if (first - touched).days > 400:
+        return []
+    until = None
+    if rule.get("UNTIL"):
+        try:
+            until = dt.datetime.strptime(rule["UNTIL"][:8], "%Y%m%d").date()
+        except ValueError:
+            until = None
+    interval = int(rule.get("INTERVAL", "1") or 1)
+    days = [WEEKDAYS_ICAL.index(d[-2:]) for d in rule.get("BYDAY", "").split(",") if d[-2:] in WEEKDAYS_ICAL]
+    days = days or [start.weekday()]
+    skipped = set(re.findall(r"(\d{8})", ev.get("EXDATE", "")))
+    week0 = start.date() - dt.timedelta(days=start.weekday())
+    out, day = [], max(first, start.date())
+    while day <= last and (until is None or day <= until):
+        weeks = ((day - dt.timedelta(days=day.weekday())) - week0).days // 7
+        if day.weekday() in days and weeks % interval == 0 and day.strftime("%Y%m%d") not in skipped:
+            out.append(dt.datetime.combine(day, start.timetz()).replace(tzinfo=None).replace(tzinfo=TZ))
+        day += dt.timedelta(days=1)
+    return out
+
+
 def looks_like_ride(title, desc):
     if IS_A_RIDE.search(title or ""):
         return True
@@ -766,6 +817,8 @@ def fetch_tribe_calendar(club, cfg, first, last, route_cache):
                 continue
             if not (first <= start_dt.date() <= last) or not looks_like_ride(title, clean_text(desc)):
                 continue
+            if not title_ok(club, title):
+                continue
             venue = ev.get("venue") if isinstance(ev.get("venue"), dict) else {}
             place = html.unescape(venue.get("venue") or "")
             address = ", ".join(x for x in (venue.get("address"), venue.get("city"),
@@ -797,12 +850,14 @@ def fetch_ical_feed(club, cfg, first, last, route_cache):
     rides = []
     text = http_get(club["id"], headers={"Accept": "text/calendar"}, raw=True).decode("utf-8", "replace")
     for ev in parse_ical(text):
-        start_dt = ical_start(ev)
         title = (ev.get("SUMMARY") or "").strip()
         desc = ev.get("DESCRIPTION") or ""
-        if not start_dt or not title or not (first <= start_dt.date() <= last):
+        if not title or (ev.get("STATUS") or "").upper() == "CANCELLED":
             continue
-        if (ev.get("STATUS") or "").upper() == "CANCELLED" or not looks_like_ride(title, desc):
+        if not looks_like_ride(title, desc) or not title_ok(club, title):
+            continue
+        starts = ical_occurrences(ev, first, last)
+        if not starts:
             continue
         start = None
         if ev.get("GEO") and ";" in ev["GEO"]:
@@ -812,12 +867,19 @@ def fetch_ical_feed(club, cfg, first, last, route_cache):
                 start = None
         loc = (ev.get("LOCATION") or "").strip()
         if not start and re.search(r"\d", loc):   # looks like a street address
-            start = geocode(loc if "CO" in loc or "Colorado" in loc else f"{loc}, Colorado")
-        if not start or not in_range(club, start, cfg):
+            start = geocode(loc if re.search(r"\bCO\b|Colorado", loc) else f"{loc}, Colorado")
+        if not start:
+            log(f"    {title}: meeting point could not be located - skipped")
             continue
-        url = ev.get("URL") or club.get("url") or club["id"]
-        rides.append(calendar_ride(club.get("label", "Club calendar"), club, title, start_dt, url,
-                                   start, desc, None, loc, route_cache))
+        if not in_range(club, start, cfg):
+            continue
+        for start_dt in starts:
+            url = ev.get("URL") or club.get("url") or club["id"]
+            ride = calendar_ride(club.get("label", "Club calendar"), club, title, start_dt, url,
+                                 start, desc, None, loc, route_cache)
+            # a repeating event shares one URL: make each date its own shareable ride
+            ride["id"] = ride_id(url + title, ride.get("route_id"), ride["date"])
+            rides.append(ride)
     return rides
 
 

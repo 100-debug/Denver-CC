@@ -1037,14 +1037,9 @@ def bikereg_date(s):
     return dt.datetime.fromtimestamp(int(m.group(1)) / 1000, tz).date()
 
 
-def near_any_region(lat, lng, cfg, radius):
-    return any(miles_between(reg["center"], [lat, lng]) <= radius for reg in cfg["regions"].values())
-
-
 def build_races(cfg):
     today = now_local().date()
     horizon = today + dt.timedelta(days=cfg["races_days_ahead"])
-    radius = cfg["races_radius_mi"]
     out, page, fetched = [], 0, 0
     while True:
         data = http_get(f"https://www.bikereg.com/api/search?states=CO&startpage={page}")
@@ -1058,7 +1053,7 @@ def build_races(cfg):
                 continue
             if name.lower().startswith("volunteer"):
                 continue
-            if end < today or start > horizon or not near_any_region(lat, lng, cfg, radius):
+            if end < today or start > horizon or not region_for([lat, lng], cfg):
                 continue
             days = [(start + dt.timedelta(days=i)).isoformat() for i in range(min((end - start).days, 13) + 1)]
             types = list(dict.fromkeys(e.get("EventTypes") or []))
@@ -1069,6 +1064,7 @@ def build_races(cfg):
                 "location": e.get("EventCity") or "",
                 "latitude": lat,
                 "longitude": lng,
+                "region": region_for([lat, lng], cfg),
                 "type": types,
                 "date": days[0] if len(days) == 1 else days,
             })
@@ -1092,7 +1088,7 @@ def build_races(cfg):
         if k not in seen:
             seen.add(k)
             uniq.append(r)
-    log(f"Races: {len(uniq)} within {radius} mi over the next {cfg['races_days_ahead']} days")
+    log(f"Races: {len(uniq)} in the coverage area over the next {cfg['races_days_ahead']} days")
     return uniq
 
 

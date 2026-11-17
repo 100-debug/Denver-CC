@@ -75,10 +75,13 @@ jobs:
           git commit -q -m "Ride data $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -q --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
 
-      # ---- GitHub Pages (skipped quietly until Pages is enabled) ----
+      # ---- GitHub Pages: turned on automatically when the token is allowed to; otherwise
+      # skipped quietly until it is enabled under Settings -> Pages -> Source: GitHub Actions ----
       - id: pages
         continue-on-error: true
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Assemble site
         if: steps.pages.outcome == 'success'

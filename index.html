@@ -770,7 +770,7 @@ Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort 
     <h1>Races &amp; Events</h1>
 
     <p>
-      Upcoming races and events within a 35-mile radius of downtown Denver or downtown Boulder for the next 2 months. Whether you're racing, spectating, or volunteering, you'll find them here. Data is pulled from the BikeReg API with every data refresh.
+      Upcoming races and events for the next 2 months across the same area as the rides: the Front Range from Denver to Fort Collins and Colorado's mountain towns. Whether you're racing, spectating, or volunteering, you'll find them here. Data is pulled from the BikeReg API with every data refresh.
     </p>
     <p style="font-size:0.9em; color:#888;">
       Major events that are not listed on <a href="https://www.bikereg.com" target="_blank" rel="noopener noreferrer">bikereg.com</a> can be added by hand in the backend (<code>backend/extra_events.json</code>).
@@ -2175,7 +2175,8 @@ Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort 
     //const routes = (ridesByDate[date] || []).filter(r => r.source === "Ride with GPS"); // Filter for debugging purposes: only show Ride with GPS routes on the map.
     //const routes = (ridesByDate[date] || []).filter(r => r.source === "Ride with GPS" || r.source === "Strava"); // Filter for debugging purposes: show both Strava and Ride with GPS routes on the map.
     const routes = ridesByDate[date] || [];
-    const races  = racesByDate[date] || [];
+    // Races follow the area filter too (races without a region are always shown)
+    const races  = (racesByDate[date] || []).filter(r => regionFilter === 'all' || !r.region || r.region === regionFilter);
 
     // Add a checkered pin for each race on this date (reuses _routeMarkers for automatic cleanup on day change)
     // Multiple races can share the same location — group them by latlng so one pin click highlights all of them.
@@ -2689,7 +2690,8 @@ Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort 
     });
 
     // Races
-    races.forEach(race => {
+    // Races only shape the map view on days without rides, so a far-away race does not zoom the map out
+    (routes.length ? [] : races).forEach(race => {
       const lat = Number(race.latitude);
       const lng = Number(race.longitude);
 

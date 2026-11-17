@@ -1,0 +1,74 @@
+name: Update ride data and deploy site
+
+# Rebuilds data/*.json from Ride with GPS, Strava, the Boulder feed, BikeReg and the
+# National Weather Service, then publishes the site to GitHub Pages.
+# Scheduled runs only fire on the repository's default branch.
+on:
+  schedule:
+    - cron: "17 19 * * *"   # about 12 PM Mountain (1 PM during daylight time)
+    - cron: "17 8 * * *"    # about 1 AM Mountain (2 AM during daylight time)
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      # Start from the data that is live right now, so a source that is down for
+      # one run keeps its last good file instead of going blank.
+      - name: Restore last published data
+        continue-on-error: true
+        run: |
+          for f in club_rides races weather detailed_weather clubs; do
+            curl -fsS --max-time 60 -o "data/$f.json.new" "${{ steps.pages.outputs.base_url }}/data/$f.json" \
+              && python3 -c "import json,sys; json.load(open(sys.argv[1]))" "data/$f.json.new" \
+              && mv "data/$f.json.new" "data/$f.json" || rm -f "data/$f.json.new"
+          done
+
+      - name: Run backend tests
+        run: python3 -m unittest discover -s backend/tests -v
+
+      - name: Build data
+        env:
+          STRAVA_CLIENT_ID: ${{ secrets.STRAVA_CLIENT_ID }}
+          STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
+          STRAVA_REFRESH_TOKEN: ${{ secrets.STRAVA_REFRESH_TOKEN }}
+        run: python3 backend/build_data.py
+
+      - name: Assemble site
+        run: |
+          mkdir _site
+          cp -r index.html gpx detailed_weather assets data sw.js manifest.json robots.txt LICENSE _site/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

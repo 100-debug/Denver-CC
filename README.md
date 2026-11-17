@@ -58,8 +58,7 @@ Every run writes what it found and corrected to `status.json` on the `data` bran
 
 ## How it stays current
 
-The **Update ride data** workflow runs four times a day (about 6 AM, 11 AM, 3 PM and 8 PM Mountain), and on every
-push to the default branch. It rebuilds the data and force-pushes it as a single commit to the `data` branch,
+The **Update ride data** workflow runs every hour, and on every push to the default branch. It rebuilds the data and force-pushes it as a single commit to the `data` branch,
 so the repository does not grow. The site reads `https://raw.githubusercontent.com/100-debug/Denver-CC/data/`
 directly, falling back to the snapshot in `data/`, so new rides appear without redeploying the site.
 
@@ -67,9 +66,9 @@ directly, falling back to the snapshot in `data/`, so new rides appear without r
 
 ### 1. Publish the site (GitHub Pages)
 
-The workflow tries to enable Pages itself and deploys the site when it can. If the site is not live at
-`https://100-debug.github.io/Denver-CC/` after a run: **Settings → Pages → Build and deployment → Source: GitHub Actions**,
-then **Actions → Update ride data → Run workflow**.
+Every workflow run publishes the finished site to the `gh-pages` branch. To serve it at
+`https://100-debug.github.io/Denver-CC/`: **Settings → Pages → Build and deployment → Source: Deploy from a branch →
+`gh-pages` / root → Save**. This is a one-time step.
 
 ### 2. Connect Strava (needed for most Denver clubs)
 

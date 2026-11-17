@@ -225,6 +225,7 @@ UNPAVED_OSM = (
     "unpaved|gravel|fine_gravel|compacted|dirt|earth|ground|grass|sand|mud|pebblestone|"
     "rock|woodchips|soil"
 )
+_overpass_down = False
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -249,16 +250,20 @@ def osm_surfaces(latlngs, snap_m=14.0):
         f'way["highway"="track"][!"surface"]({bbox});'
         f");out geom;"
     )
+    global _overpass_down
+    if _overpass_down:
+        return None
     data = None
     for base in OVERPASS_URLS:
         try:
-            data = http_get(
-                base, data=urllib.parse.urlencode({"data": query}).encode(), timeout=120, retries=2
-            )
+            data = http_get(base, data=urllib.parse.urlencode({"data": query}).encode(), timeout=45, retries=1)
             break
         except Exception as e:  # noqa: BLE001 - any failure -> try the next mirror
             log(f"    overpass {base.split('/')[2]} failed: {e}")
     if data is None:
+        # Both mirrors failed: stop asking for the rest of this run so it cannot stall.
+        _overpass_down = True
+        log("    OpenStreetMap surface lookup unavailable - remaining routes are left untagged this run")
         return None
 
     lat0 = (min(lats) + max(lats)) / 2
@@ -517,13 +522,21 @@ def strava_token():
     return tok["access_token"]
 
 
-def strava_route(route_id, auth, cache):
+def strava_route(route_id, auth, cache, previous=None):
+    """
+    Route geometry for a Strava route. To stay inside Strava's daily request limit, a route
+    that was already published by the last run is reused instead of downloaded again
+    (except on the nightly run, which refreshes everything).
+    """
     if route_id in cache:
+        return cache[route_id]
+    if previous and route_id in previous and now_local().hour != 3:
+        cache[route_id] = previous[route_id]
         return cache[route_id]
     try:
         meta = http_get(f"{STRAVA_API}/routes/{route_id}", headers=auth)
     except HttpError as e:
-        log(f"    strava route {route_id}: {e} - skipped")
+        log(f"    strava route {route_id}: {e} - listed without a route")
         cache[route_id] = None
         return None
     pts = []
@@ -548,32 +561,33 @@ def strava_route(route_id, auth, cache):
     return out
 
 
-def fetch_strava_club(club, cfg, first, last, auth, route_cache):
+def fetch_strava_club(club, cfg, first, last, auth, route_cache, previous=None):
     rides = []
     events = http_get(f"{STRAVA_API}/clubs/{club['id']}/group_events?upcoming=true&per_page=200", headers=auth)
     for ev in events:
         if ev.get("activity_type") and ev["activity_type"] not in CYCLING_TYPES:
             continue
+        if ev.get("private"):
+            continue
         route_id = (ev.get("route") or {}).get("id_str") or ev.get("route_id")
-        if not route_id:
-            continue  # same rule as the Boulder site: no route, no listing
         for occ in ev.get("upcoming_occurrences") or []:
             start_dt = parse_iso(occ).astimezone(TZ)
             if not (first <= start_dt.date() <= last):
                 continue
-            r = strava_route(str(route_id), auth, route_cache)
-            if not r:
+            r = strava_route(str(route_id), auth, route_cache, previous) if route_id else None
+            start = ev.get("start_latlng") or (r["points"][0][:2] if r else None)
+            if not start or not in_range(club, start, cfg):
                 continue
-            start = ev.get("start_latlng") or r["points"][0][:2]
-            if not in_range(club, start, cfg):
-                continue
-            ride = make_ride(
-                "Strava", club, ev.get("title") or "Group ride", start_dt,
-                f"https://www.strava.com/clubs/{club['id']}/group_events/{ev.get('id_str') or ev['id']}",
-                start, int(route_id), r["distance"], r["gain"], r["points"],
-                pace_from_text(ev.get("description")) or club.get("avg_speed_mph"),
-                desc=ev.get("description"), address=ev.get("address"),
-            )
+            url = f"https://www.strava.com/clubs/{club['id']}/group_events/{ev.get('id_str') or ev['id']}"
+            speed = pace_from_text(ev.get("description")) or club.get("avg_speed_mph")
+            if r:
+                ride = make_ride("Strava", club, ev.get("title") or "Group ride", start_dt, url, start,
+                                 int(route_id), r["distance"], r["gain"], r["points"], speed,
+                                 desc=ev.get("description"), address=ev.get("address"))
+            else:  # no route attached (or not readable): listed as a start pin
+                ride = make_ride("Strava", club, ev.get("title") or "Group ride", start_dt, url, start,
+                                 None, None, None, [], speed,
+                                 desc=ev.get("description"), address=ev.get("address"))
             ride["women_only"] = bool(ev.get("women_only")) or ride["women_only"]
             rides.append(ride)
     return rides
@@ -838,7 +852,7 @@ def fetch_boulder_feed(cfg, first, last):
 # --------------------------------------------------------------------------------------
 # Rides
 # --------------------------------------------------------------------------------------
-def build_rides(cfg):
+def build_rides(cfg, previous=None):
     first, last = date_window(cfg["days_ahead"])
     log(f"Rides window: {first} .. {last}")
     rides, failures = [], []
@@ -862,7 +876,7 @@ def build_rides(cfg):
             elif club["source"] == "strava":
                 if not auth:
                     continue
-                got = fetch_strava_club(club, cfg, first, last, auth, st_cache)
+                got = fetch_strava_club(club, cfg, first, last, auth, st_cache, previous)
             elif club["source"] == "meetup":
                 got = fetch_meetup_group(club, cfg, first, last, rw_cache)
             elif club["source"] == "tribe":
@@ -983,6 +997,23 @@ def finish_rides(rides, cfg):
         else:
             warnings.append(f"duplicate removed: {r['club_name']} / {r['title']} ({r['source']})")
     return list(best.values()), warnings
+
+
+def previous_strava_routes(path):
+    """Strava routes from the last published club_rides.json, keyed by route id (see strava_route)."""
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for r in json.load(f):
+                if r.get("source") == "Strava" and r.get("route_id") and r.get("route") and not r.get("_feed"):
+                    out[str(r["route_id"])] = {
+                        "name": "", "points": r["route"], "needs_osm": any(p[3] is None for p in r["route"]),
+                        "distance": r["dist_mi"] / MI_PER_M if r.get("dist_mi") else None,
+                        "gain": r["elev_gain_ft"] / FT_PER_M if r.get("elev_gain_ft") is not None else None,
+                    }
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return out
 
 
 def club_directory(cfg, rides):
@@ -1344,7 +1375,7 @@ def main():
             pass
 
     if "rides" in want:
-        rides, boulder_detailed, failures, warnings = build_rides(cfg)
+        rides, boulder_detailed, failures, warnings = build_rides(cfg, previous_strava_routes(os.path.join(args.out, "club_rides.json")))
         problems += failures
         warnings = list(warnings)
         if "detailed" in want:

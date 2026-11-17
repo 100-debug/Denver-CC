@@ -1,23 +1,17 @@
 name: Update ride data
 
-# Rebuilds data/*.json several times a day and publishes it on the `data` branch,
-# which is where the site reads its data from. If GitHub Pages is enabled for the
-# repository (Settings -> Pages -> Source: GitHub Actions), the site is deployed too.
+# Rebuilds data/*.json every hour and publishes it on the `data` branch, which is
+# where the site reads its data from. Also publishes the site as a `gh-pages` branch.
 # Scheduled runs only fire on the repository's default branch.
 on:
   schedule:
-    - cron: "23 13 * * *"   # about 6 AM Mountain
-    - cron: "23 18 * * *"   # about 11 AM Mountain
-    - cron: "23 22 * * *"   # about 3 PM Mountain
-    - cron: "23 3 * * *"    # about 8 PM Mountain
+    - cron: "23 * * * *"    # every hour
   workflow_dispatch:
   push:
     paths-ignore: ["README.md"]
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: update-data
@@ -28,8 +22,6 @@ jobs:
     # pushes only trigger a rebuild on the default branch
     if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
-    outputs:
-      pages: ${{ steps.pages.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -75,32 +67,20 @@ jobs:
           git commit -q -m "Ride data $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -q --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
 
-      # ---- GitHub Pages: turned on automatically when the token is allowed to; otherwise
-      # skipped quietly until it is enabled under Settings -> Pages -> Source: GitHub Actions ----
-      - id: pages
-        continue-on-error: true
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
-
-      - name: Assemble site
-        if: steps.pages.outcome == 'success'
+      # The site itself, as a `gh-pages` branch (one commit, replaced on every run).
+      # GitHub Pages serves it at https://<owner>.github.io/<repo>/ once Pages is on
+      # (Settings -> Pages -> Source: Deploy from a branch -> gh-pages).
+      - name: Publish site branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir _site
+          rm -rf _site && mkdir _site
           cp -r index.html gpx detailed_weather assets data sw.js manifest.json robots.txt LICENSE _site/
-
-      - if: steps.pages.outcome == 'success'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: _site
-
-  deploy:
-    needs: build
-    if: needs.build.outputs.pages == 'true'
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          touch _site/.nojekyll
+          cd _site
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Site $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages

@@ -2708,7 +2708,7 @@ Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort 
       const bannerPad = (window._bannerHeightPx || 0) + padY;  // If a banner is active, add its height to the top padding so routes are fitted into the visible area below the banner, not hidden underneath it.
       map.fitBounds(
         [[minLng, minLat], [maxLng, maxLat]], // [[west, south], [east, north]]
-        { padding: { top: bannerPad, bottom: padY, left: padX, right: padX }, maxZoom: DEFAULT_ZOOM }
+        { padding: { top: bannerPad + 24, bottom: padY + 64, left: padX + 16, right: padX + 16 }, maxZoom: 13 } // extra room for pins, the area chips and the menu button
       );
     }
   }

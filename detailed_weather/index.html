@@ -125,7 +125,19 @@
     }
   }
 
-  const DATA_BASE_URL = '../data/';
+  const DATA_SOURCES = ['https://raw.githubusercontent.com/100-debug/Denver-CC/data/', '../data/'];
+  // Live data branch first, bundled snapshot second (same as index.html).
+  async function fetchData(file, options) {
+    let lastError = null;
+    for (const base of DATA_SOURCES) {
+      try {
+        const res = await fetch(base + file, options);
+        if (res.ok) return res;
+        lastError = new Error(base + file + ' -> HTTP ' + res.status);
+      } catch (e) { lastError = e; }
+    }
+    throw lastError;
+  }
 
   // Read which ride to show from the URL, e.g. ?title=Lollipop&date=2026-10-11 09:00
   const params = new URLSearchParams(location.search);
@@ -639,7 +651,7 @@
   (async function init() {
     const statusEl = document.getElementById('status');
     try {
-      const res = await fetch(DATA_BASE_URL + 'detailed_weather.json?v=' + Date.now(), { cache: 'no-store' });
+      const res = await fetchData('detailed_weather.json?v=' + Date.now(), { cache: 'no-store' });
       const data = await res.json();
       const ride = data.rides.find(r => r.ride_title === rideTitle && r.date === rideDate);
 

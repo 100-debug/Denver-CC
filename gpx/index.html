@@ -217,7 +217,19 @@
 
   // Ride data is served from the site's own data/ folder, same as index.html.
   // The ?v=timestamp + cache:'no-store' combo bypasses browser/PWA caching.
-  const DATA_BASE_URL = '../data/';
+  const DATA_SOURCES = ['https://raw.githubusercontent.com/100-debug/Denver-CC/data/', '../data/'];
+  // Live data branch first, bundled snapshot second (same as index.html).
+  async function fetchData(file, options) {
+    let lastError = null;
+    for (const base of DATA_SOURCES) {
+      try {
+        const res = await fetch(base + file, options);
+        if (res.ok) return res;
+        lastError = new Error(base + file + ' -> HTTP ' + res.status);
+      } catch (e) { lastError = e; }
+    }
+    throw lastError;
+  }
 
 
   // ============================================================
@@ -406,7 +418,7 @@ ${trkpts}
   async function init() {
     let rides;
     try {
-      const res = await fetch(DATA_BASE_URL + 'club_rides.json?v=' + Date.now(), { cache: 'no-store' });
+      const res = await fetchData('club_rides.json?v=' + Date.now(), { cache: 'no-store' });
       rides = await res.json();
     } catch (err) {
       document.getElementById('status').textContent = 'Could not load ride data. Please try again later.';

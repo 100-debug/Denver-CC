@@ -71,16 +71,104 @@ class Helpers(unittest.TestCase):
         self.assertAlmostEqual(rise.minute, 47, delta=4)
         self.assertAlmostEqual(sset.minute, 43, delta=4)
 
-    def test_in_range(self):
-        cfg = {"regions": {"denver": {"center": [39.7392, -104.9903]}}, "home_radius_mi": 35, "other_radius_mi": 15}
-        golden = [39.7555, -105.2211]
-        boulder = [40.01499, -105.27055]
-        self.assertTrue(b.in_range({"region": "denver"}, golden, cfg))
-        self.assertTrue(b.in_range({"region": "denver"}, boulder, cfg))
-        self.assertFalse(b.in_range({"region": "denver", "home": False}, boulder, cfg))
+    CFG = {"regions": {"denver": {"center": [39.7392, -104.9903], "radius_mi": 30},
+                       "boulder": {"center": [40.01499, -105.27055], "radius_mi": 22},
+                       "foco": {"center": [40.5853, -105.0844], "radius_mi": 30},
+                       "mountains": {}},
+           "mountain_line_lng": -105.6, "mountain_edge_lng": -105.2}
+
+    def test_region_for(self):
+        r = lambda lat, lng: b.region_for([lat, lng], self.CFG)  # noqa: E731
+        self.assertEqual(r(39.7555, -105.2211), "denver")     # Golden
+        self.assertEqual(r(39.9778, -105.1319), "boulder")    # Louisville
+        self.assertEqual(r(40.1672, -105.1019), "boulder")    # Longmont
+        self.assertEqual(r(40.3978, -105.0750), "foco")       # Loveland
+        self.assertEqual(r(39.6403, -106.3742), "mountains")  # Vail
+        self.assertEqual(r(39.4817, -106.0384), "mountains")  # Breckenridge
+        self.assertEqual(r(40.4850, -106.8317), "mountains")  # Steamboat Springs
+        self.assertEqual(r(39.6333, -105.3172), "denver")     # Evergreen stays a Denver foothills ride
+        self.assertIsNone(r(41.14, -104.82))                  # Cheyenne, WY: outside coverage
+        self.assertIsNone(r(35.68, -105.94))                  # Santa Fe, NM
+
+    def test_clean_text_removes_contact_details_and_links(self):
+        t = b.clean_text("<p>Meet <b>Sam</b> (720-555-0199) or sam@example.org. Route: [map](https://x.y/z) https://a.b</p>")
+        self.assertNotIn("720", t)
+        self.assertNotIn("@", t)
+        self.assertNotIn("http", t)
+        self.assertIn("Meet Sam", t)
+        self.assertTrue(len(b.clean_text("word " * 500)) <= 601)
+
+    def test_ride_type_needs_firm_evidence(self):
+        self.assertEqual(b.ride_type_for("Sunday Gravel Ride", "", None), "gravel")
+        self.assertEqual(b.ride_type_for("Thursday MTB", "", None), "mtb")
+        self.assertEqual(b.ride_type_for("Saturday Roll", "", 0), "road")
+        self.assertEqual(b.ride_type_for("Saturday Roll", "", 35), "gravel")
+        # words in a description are not evidence
+        self.assertIsNone(b.ride_type_for("Tuesday Night Climb", "road conditions may vary, some gravel", None))
+
+    def test_looks_like_ride(self):
+        self.assertTrue(b.looks_like_ride("Northside Winter Road Ride", ""))
+        self.assertFalse(b.looks_like_ride("Annual Banquet", "Join us for dinner"))
+        self.assertFalse(b.looks_like_ride("Board Meeting", "we will discuss rides"))
+        self.assertTrue(b.looks_like_ride("Phil's Circuit", "social B ride on the Greenway"))
+
+    def test_parse_ical(self):
+        text = ("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nDTSTART;TZID=America/Denver:20261121T094500\r\n"
+                "SUMMARY:Winter Ride\\, north\r\nDESCRIPTION:line one\\nline\r\n  two\r\n"
+                "URL;VALUE=URI:https://www.meetup.com/x/events/1/\r\nEND:VEVENT\r\n"
+                "BEGIN:VEVENT\r\nDTSTART;VALUE=DATE:20261122\r\nSUMMARY:All day\r\nEND:VEVENT\r\nEND:VCALENDAR")
+        evs = b.parse_ical(text)
+        self.assertEqual(len(evs), 2)
+        self.assertEqual(evs[0]["SUMMARY"], "Winter Ride, north")
+        self.assertEqual(evs[0]["DESCRIPTION"], "line one\nline two")
+        self.assertEqual(evs[0]["URL"], "https://www.meetup.com/x/events/1/")
+        self.assertEqual(b.fmt_ride_date(b.ical_start(evs[0])), "2026-11-21 09:45")
+        self.assertIsNone(b.ical_start(evs[1]))   # all-day entries have no start time
+
+    def test_find_venue(self):
+        data = {"props": {"a": [{"venue": {"name": "Park", "lat": 39.7, "lng": -105.2, "address": "1 Main"}}]}}
+        self.assertEqual(b._find_venue(data)["name"], "Park")
+        self.assertIsNone(b._find_venue({"x": {"lat": 0, "lng": 0, "name": "online"}}))
+
+    def _ride(self, **kw):
+        base = {"source": "Meetup", "club_name": "Club", "title": "Saturday Ride", "date": "2026-11-21 09:00",
+                "url": "https://x/1", "starting_location": [39.75, -105.0], "women_only": False,
+                "route_id": None, "dist_mi": None, "elev_gain_ft": None, "route": []}
+        base.update(kw)
+        return base
+
+    def test_finish_rides_measures_distance_and_flags_mismatch(self):
+        # 0.1 degree of latitude is 6.9 miles; the source claims 20
+        route = [[39.75 + i * 0.001, -105.0, 1600, 1] for i in range(101)]
+        rides, warnings = b.finish_rides([self._ride(route=route, dist_mi=20.0, route_id=7, elev_gain_ft=100)], self.CFG)
+        self.assertAlmostEqual(rides[0]["dist_mi"], 6.9, delta=0.1)
+        self.assertTrue(any("distance corrected" in w for w in warnings))
+        self.assertTrue(rides[0]["has_route"])
+        self.assertEqual(rides[0]["unpaved_pct"], 0)
+        self.assertEqual(rides[0]["region"], "denver")
+        self.assertEqual(len(rides[0]["id"]), 10)
+
+    def test_finish_rides_pin_only_and_outside_coverage(self):
+        rides, warnings = b.finish_rides([self._ride(), self._ride(title="Far", starting_location=[41.14, -104.82])], self.CFG)
+        self.assertEqual(len(rides), 1)
+        self.assertFalse(rides[0]["has_route"])
+        self.assertIsNone(rides[0]["dist_mi"])
+        self.assertTrue(any("outside coverage" in w for w in warnings))
+
+    def test_finish_rides_removes_cross_platform_duplicates(self):
+        route = [[39.75 + i * 0.001, -105.0, 1600, 1] for i in range(50)]
+        a = self._ride()                                             # Meetup listing, no route
+        c = self._ride(source="Ride with GPS", url="https://y/2", route=route, route_id=9, dist_mi=3.4)
+        rides, _ = b.finish_rides([a, c], self.CFG)
+        self.assertEqual(len(rides), 1)
+        self.assertEqual(rides[0]["source"], "Ride with GPS")        # the listing with a route wins
+        # two route options of the same event are both kept
+        d = self._ride(source="Ride with GPS", url="https://y/2", route=route, route_id=10, dist_mi=3.4)
+        rides, _ = b.finish_rides([c, d], self.CFG)
+        self.assertEqual(len(rides), 2)
 
     def test_make_ride_shape(self):
-        club = {"id": 1, "name": "Test Club", "region": "denver"}
+        club = {"id": 1, "name": "Test Club"}
         start = dt.datetime(2026, 11, 21, 9, 0, tzinfo=b.TZ)
         r = b.make_ride("Ride with GPS", club, " Saturday ", start, "https://x", [39.7, -105.0], 5,
                         16093.44, 100.0, [[39.7, -105.0, 1600, 1]], None)

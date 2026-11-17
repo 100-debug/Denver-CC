@@ -11,6 +11,8 @@ Builds the four JSON files the frontend reads (same formats as boulderrides.cc):
 
 Sources
     Ride with GPS   public club/organization event pages (no credentials needed)
+    Meetup          public group calendars (iCal) + the event page for the meeting point
+    Event calendars WordPress "The Events Calendar" sites (e.g. Bicycle Colorado)
     Strava          club group events (needs STRAVA_CLIENT_ID / STRAVA_CLIENT_SECRET /
                     STRAVA_REFRESH_TOKEN in the environment; skipped when absent)
     Boulder feed    the public boulderrides.cc data branch, merged in as-is
@@ -26,6 +28,8 @@ Python 3.9+, standard library only.
 
 import argparse
 import datetime as dt
+import hashlib
+import html
 import json
 import math
 import os
@@ -310,19 +314,101 @@ def pace_from_text(text):
     return found.pop() if len(found) == 1 else None
 
 
+COLORADO_BBOX = (36.99, -109.06, 41.01, -102.04)  # south, west, north, east
+
+
+def region_for(start, cfg):
+    """
+    Area a ride belongs to, decided by where it STARTS (not by where its club is based):
+    the nearest city region within that region's radius, otherwise "mountains" for
+    anything else in Colorado west of the Front Range foothills. None = outside coverage.
+    """
+    lat, lng = start[0], start[1]
+    s, w, n, e = COLORADO_BBOX
+    if not (s <= lat <= n and w <= lng <= e):
+        return None
+    best, best_mi = None, None
+    for key, reg in cfg["regions"].items():
+        if not reg.get("center"):
+            continue
+        mi = miles_between(reg["center"], start)
+        if mi <= reg.get("radius_mi", 30) and (best_mi is None or mi < best_mi):
+            best, best_mi = key, mi
+    if best and lng > cfg.get("mountain_line_lng", -105.6):
+        return best
+    if lng <= cfg.get("mountain_edge_lng", -105.2):
+        return "mountains"
+    return best
+
+
 def in_range(club, start, cfg):
-    """Rides must start near the club's home city (wider radius for local clubs)."""
-    center = cfg["regions"][club["region"]]["center"]
-    radius = cfg["home_radius_mi"] if club.get("home", True) else cfg["other_radius_mi"]
-    return miles_between(center, start) <= radius
+    """A ride is kept when it starts inside the coverage area."""
+    return region_for(start, cfg) is not None
 
 
-def make_ride(source, club, title, start_dt, url, start, route_id, dist_m, gain_m, route, speed):
+PHONE_RE = re.compile(r"\(?\b\d{3}\)?[-. ]\d{3}[-. ]\d{4}\b")
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+RWGPS_ROUTE_LINK = re.compile(r"ridewithgps\.com/routes/(\d+)")
+
+
+def clean_text(text, limit=600):
+    """Plain text from an event description: no HTML/markdown links, no phone numbers or emails."""
+    t = html.unescape(re.sub(r"<[^>]+>", " ", text or ""))
+    t = re.sub(r"\[([^\]]*)\]\((https?://[^)]+)\)", r"\1", t)      # [label](url) -> label
+    t = re.sub(r"https?://\S+", "", t)
+    t = PHONE_RE.sub("[phone on event page]", t)
+    t = EMAIL_RE.sub("[email on event page]", t)
+    t = re.sub(r"[*_#>\\]+", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) > limit:
+        t = t[:limit].rsplit(" ", 1)[0] + "…"
+    return t
+
+
+def ride_type_for(title, desc, unpaved_pct):
+    """
+    road / gravel / mtb, only on firm evidence: the event TITLE says so, or the route's
+    measured surface does. Descriptions are too loose ("road conditions", "some gravel").
+    """
+    t = (title or "").lower()
+    if re.search(r"\bmtb\b|mountain bik|singletrack|single track|fat ?bike|enduro", t):
+        return "mtb"
+    if "gravel" in t or (unpaved_pct is not None and unpaved_pct >= 20):
+        return "gravel"
+    if re.search(r"\broad\b", t) or (unpaved_pct is not None and unpaved_pct < 5):
+        return "road"
+    return None
+
+
+def route_metrics(route):
+    """(distance_m, unpaved_pct) measured from the route geometry itself."""
+    if not route or len(route) < 2:
+        return None, None
+    cum = cumulative_m(route)
+    total = cum[-1]
+    tagged = [p[3] for p in route if len(p) > 3 and p[3] is not None]
+    pct = None
+    if total > 0 and len(tagged) >= 0.8 * len(route):
+        unpaved = sum(cum[i] - cum[i - 1] for i in range(1, len(route)) if route[i][3] == 0)
+        pct = int(round(100 * unpaved / total))
+    return total, pct
+
+
+def ride_id(url, route_id, date):
+    return hashlib.sha1(f"{url}|{route_id}|{date}".encode()).hexdigest()[:10]
+
+
+def make_ride(source, club, title, start_dt, url, start, route_id, dist_m, gain_m, route, speed,
+              desc="", place=None, address=None):
     return {
+        "id": ride_id(url, route_id, fmt_ride_date(start_dt)),
         "source": source,
-        "club_id": club.get("id"),
+        "club_id": club.get("id") if isinstance(club.get("id"), int) else None,
         "club_name": club["name"],
-        "region": club["region"],
+        "region": club.get("region"),  # replaced by the geographic region in finish_ride()
+        "description": clean_text(desc),
+        "start_name": (place or "").strip() or None,
+        "start_address": (address or "").strip() or None,
         "title": title.strip(),
         "date": fmt_ride_date(start_dt),
         "url": url,
@@ -402,12 +488,13 @@ def fetch_rwgps_club(club, cfg, first, last, route_cache):
             if ev.get("computed_lat") is not None and ev.get("computed_lng") is not None:
                 start = [ev["computed_lat"], ev["computed_lng"]]
             if not in_range(club, start, cfg):
-                log(f"    {it['name']}: starts outside the {club['region']} radius - skipped")
+                log(f"    {it['name']}: starts outside the coverage area - skipped")
                 continue
             title = it["name"] if len(routes) == 1 else f"{it['name']} | {r['name']}"
             rides.append(make_ride(
                 "Ride with GPS", club, title, start_dt, f"{RWGPS}/events/{ev_id}", start,
                 rt["id"], r["distance"], r["gain"], r["points"], speed,
+                desc=ev.get("desc"), address=ev.get("location"),
             ))
     return rides
 
@@ -485,9 +572,238 @@ def fetch_strava_club(club, cfg, first, last, auth, route_cache):
                 f"https://www.strava.com/clubs/{club['id']}/group_events/{ev.get('id_str') or ev['id']}",
                 start, int(route_id), r["distance"], r["gain"], r["points"],
                 pace_from_text(ev.get("description")) or club.get("avg_speed_mph"),
+                desc=ev.get("description"), address=ev.get("address"),
             )
             ride["women_only"] = bool(ev.get("women_only")) or ride["women_only"]
             rides.append(ride)
+    return rides
+
+
+# --------------------------------------------------------------------------------------
+# Shared by the calendar-style sources (Meetup, event calendars): these events carry a
+# meeting point but usually no route. A Ride with GPS route link in the description is
+# followed; otherwise the ride is listed as a start pin without a route.
+# --------------------------------------------------------------------------------------
+NOT_A_RIDE = re.compile(
+    r"\b(meeting|happy hour|banquet|party|potluck|picnic|dinner|luncheon|volunteer|trail ?work|"
+    r"clinic|class|workshop|webinar|fundraiser|gala|swap|movie|hike|run|ski|snowshoe)\b", re.I)
+IS_A_RIDE = re.compile(r"\b(ride|rides|riding|mtb|gravel|cycling|bike|spin|climb|loop|century|paceline)\b", re.I)
+
+
+def looks_like_ride(title, desc):
+    if IS_A_RIDE.search(title or ""):
+        return True
+    if NOT_A_RIDE.search(title or ""):
+        return False
+    return bool(IS_A_RIDE.search(desc or ""))
+
+
+def calendar_ride(source, club, title, start_dt, url, start, desc, place, address, route_cache):
+    """Builds a ride from a calendar event; attaches a route when the description links one."""
+    m = RWGPS_ROUTE_LINK.search(desc or "")
+    r = rwgps_route(int(m.group(1)), route_cache) if m else None
+    speed = pace_from_text(desc) or club.get("avg_speed_mph")
+    if r:
+        # keep the organizer's meeting point; the linked route only supplies the line
+        return make_ride(source, club, title, start_dt, url, start, int(m.group(1)),
+                         r["distance"], r["gain"], r["points"], speed, desc, place, address)
+    return make_ride(source, club, title, start_dt, url, start, None, None, None, [], speed,
+                     desc, place, address)
+
+
+# ---- Meetup -----------------------------------------------------------------------------
+def parse_ical(text):
+    """Minimal iCalendar reader -> list of {SUMMARY, DTSTART, DESCRIPTION, URL, STATUS, LOCATION, GEO}."""
+    text = re.sub(r"\r?\n[ \t]", "", text)  # unfold continuation lines
+    events = []
+    for block in text.split("BEGIN:VEVENT")[1:]:
+        ev = {}
+        for line in block.split("END:VEVENT")[0].splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            name = key.split(";")[0].upper()
+            value = (value.replace("\\n", "\n").replace("\\N", "\n").replace("\\,", ",")
+                     .replace("\\;", ";").replace("\\\\", "\\"))
+            ev[name] = value
+            if name == "DTSTART":
+                tz = re.search(r"TZID=([^;:]+)", key)
+                ev["_TZID"] = tz.group(1) if tz else None
+                ev["_DATE_ONLY"] = "VALUE=DATE" in key.upper() and "T" not in value
+        events.append(ev)
+    return events
+
+
+def ical_start(ev):
+    """Timezone-aware start, or None for all-day / unparseable entries."""
+    raw = ev.get("DTSTART", "")
+    if ev.get("_DATE_ONLY") or "T" not in raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            return dt.datetime.strptime(raw, "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc).astimezone(TZ)
+        naive = dt.datetime.strptime(raw[:15], "%Y%m%dT%H%M%S")
+        return naive.replace(tzinfo=ZoneInfo(ev.get("_TZID") or "America/Denver")).astimezone(TZ)
+    except (ValueError, KeyError):
+        return None
+
+
+def _find_venue(node):
+    """First dict in Meetup's page data that looks like a venue (has lat + lng + a name)."""
+    if isinstance(node, dict):
+        lat, lng = node.get("lat"), node.get("lng", node.get("lon"))
+        if isinstance(lat, (int, float)) and isinstance(lng, (int, float)) and (lat or lng) and node.get("name"):
+            return node
+        for v in node.values():
+            hit = _find_venue(v)
+            if hit:
+                return hit
+    elif isinstance(node, list):
+        for v in node:
+            hit = _find_venue(v)
+            if hit:
+                return hit
+    return None
+
+
+def meetup_venue(url):
+    page = http_get(url, headers={"Accept": "text/html"}, raw=True).decode("utf-8", "replace")
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', page, re.S)
+    if not m:
+        return None
+    return _find_venue(json.loads(m.group(1)))
+
+
+def fetch_meetup_group(club, cfg, first, last, route_cache):
+    rides = []
+    text = http_get(f"https://www.meetup.com/{club['id']}/events/ical/",
+                    headers={"Accept": "text/calendar"}, raw=True).decode("utf-8", "replace")
+    seen = set()
+    for ev in parse_ical(text):
+        start_dt = ical_start(ev)
+        url = ev.get("URL")
+        if not start_dt or not url or not (first <= start_dt.date() <= last):
+            continue
+        if (ev.get("STATUS") or "").upper() == "CANCELLED" or url in seen:
+            continue
+        seen.add(url)
+        title = (ev.get("SUMMARY") or "").strip()
+        desc = ev.get("DESCRIPTION") or ""
+        if desc.startswith(club["name"]):          # Meetup prefixes the group name
+            desc = desc[len(club["name"]):]
+        if not title or re.search(r"\bcancel", title, re.I) or not looks_like_ride(title, desc):
+            continue
+        venue = meetup_venue(url)
+        if not venue:
+            log(f"    {title} ({start_dt:%a %m/%d}): no meeting point published - skipped")
+            continue
+        start = [float(venue["lat"]), float(venue.get("lng", venue.get("lon")))]
+        if not in_range(club, start, cfg):
+            continue
+        address = ", ".join(x for x in (venue.get("address"), venue.get("city"), venue.get("state")) if x)
+        rides.append(calendar_ride("Meetup", club, title, start_dt, url, start, desc,
+                                   venue.get("name"), address, route_cache))
+    return rides
+
+
+# ---- WordPress "The Events Calendar" sites (Bicycle Colorado, ...) ---------------------
+_geocode_cache = {}
+
+
+def geocode(query):
+    """Address -> [lat, lng] via OpenStreetMap Nominatim (1 request/second, cached). None if not found."""
+    key = re.sub(r"\s+", " ", query.strip().lower())
+    if key in _geocode_cache:
+        return _geocode_cache[key]
+    hit = None
+    try:
+        time.sleep(1.0)
+        res = http_get("https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode(
+            {"format": "jsonv2", "limit": 1, "countrycodes": "us", "q": query}))
+        # only accept a specific place or address, never a whole town or county
+        if res and res[0].get("addresstype") not in ("city", "town", "village", "county", "state", "municipality"):
+            hit = [float(res[0]["lat"]), float(res[0]["lon"])]
+    except Exception as e:  # noqa: BLE001
+        log(f"    geocoder failed for {query!r}: {e}")
+        return None
+    _geocode_cache[key] = hit
+    return hit
+
+
+def fetch_tribe_calendar(club, cfg, first, last, route_cache):
+    rides, page = [], 1
+    cats = [c.lower() for c in club.get("categories", [])]
+    while page <= 5:
+        q = urllib.parse.urlencode({"per_page": 50, "page": page, "start_date": first.isoformat(),
+                                    "end_date": (last + dt.timedelta(days=1)).isoformat()})
+        data = http_get(f"{club['id'].rstrip('/')}/wp-json/tribe/events/v1/events?{q}")
+        for ev in data.get("events", []):
+            names = [c.get("name", "").lower() for c in ev.get("categories") or []]
+            if cats and not any(c in names for c in cats):
+                continue
+            if ev.get("all_day"):
+                continue
+            title = html.unescape(ev.get("title") or "").strip()
+            desc = ev.get("description") or ""
+            try:
+                start_dt = dt.datetime.strptime(ev["start_date"], "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=ZoneInfo(ev.get("timezone") or "America/Denver")).astimezone(TZ)
+            except (KeyError, ValueError):
+                continue
+            if not (first <= start_dt.date() <= last) or not looks_like_ride(title, clean_text(desc)):
+                continue
+            venue = ev.get("venue") if isinstance(ev.get("venue"), dict) else {}
+            place = html.unescape(venue.get("venue") or "")
+            address = ", ".join(x for x in (venue.get("address"), venue.get("city"),
+                                            venue.get("stateprovince") or venue.get("state")) if x)
+            start = None
+            if venue.get("geo_lat") and venue.get("geo_lng"):
+                start = [float(venue["geo_lat"]), float(venue["geo_lng"])]
+            elif venue.get("address") and venue.get("city"):
+                start = geocode(f"{address}, Colorado")
+            if not start and place and venue.get("city"):
+                start = geocode(f"{place}, {venue['city']}, Colorado")
+            if not start:
+                log(f"    {title} ({start_dt:%a %m/%d}): meeting point could not be located - skipped")
+                continue
+            if not in_range(club, start, cfg):
+                continue
+            organizer = (ev.get("organizer") or [{}])[0].get("organizer")
+            host = dict(club, name=html.unescape(organizer) if organizer else club["name"])
+            rides.append(calendar_ride(club.get("label", "Event calendar"), host, title, start_dt,
+                                       ev.get("url"), start, desc, place, address, route_cache))
+        if page >= (data.get("total_pages") or 1):
+            break
+        page += 1
+    return rides
+
+
+# ---- Any public iCal feed that carries GEO coordinates or a street address --------------
+def fetch_ical_feed(club, cfg, first, last, route_cache):
+    rides = []
+    text = http_get(club["id"], headers={"Accept": "text/calendar"}, raw=True).decode("utf-8", "replace")
+    for ev in parse_ical(text):
+        start_dt = ical_start(ev)
+        title = (ev.get("SUMMARY") or "").strip()
+        desc = ev.get("DESCRIPTION") or ""
+        if not start_dt or not title or not (first <= start_dt.date() <= last):
+            continue
+        if (ev.get("STATUS") or "").upper() == "CANCELLED" or not looks_like_ride(title, desc):
+            continue
+        start = None
+        if ev.get("GEO") and ";" in ev["GEO"]:
+            try:
+                start = [float(x) for x in ev["GEO"].split(";")[:2]]
+            except ValueError:
+                start = None
+        loc = (ev.get("LOCATION") or "").strip()
+        if not start and re.search(r"\d", loc):   # looks like a street address
+            start = geocode(loc if "CO" in loc or "Colorado" in loc else f"{loc}, Colorado")
+        if not start or not in_range(club, start, cfg):
+            continue
+        url = ev.get("URL") or club.get("url") or club["id"]
+        rides.append(calendar_ride(club.get("label", "Club calendar"), club, title, start_dt, url,
+                                   start, desc, None, loc, route_cache))
     return rides
 
 
@@ -507,6 +823,7 @@ def fetch_boulder_feed(cfg, first, last):
             continue
         if first <= d <= last and r.get("route"):
             r["region"] = "boulder"
+            r["_feed"] = True
             keep.append(r)
     detailed = {}
     try:
@@ -546,6 +863,12 @@ def build_rides(cfg):
                 if not auth:
                     continue
                 got = fetch_strava_club(club, cfg, first, last, auth, st_cache)
+            elif club["source"] == "meetup":
+                got = fetch_meetup_group(club, cfg, first, last, rw_cache)
+            elif club["source"] == "tribe":
+                got = fetch_tribe_calendar(club, cfg, first, last, rw_cache)
+            elif club["source"] == "ical":
+                got = fetch_ical_feed(club, cfg, first, last, rw_cache)
             else:
                 continue
             log(f"  {club['name']} [{club['source']}]: {len(got)} ride(s)")
@@ -578,8 +901,88 @@ def build_rides(cfg):
         log(f"  Boulder feed FAILED - {e}")
 
     rides += boulder
+    rides, warnings = finish_rides(rides, cfg)
     rides.sort(key=lambda r: (r["date"], r["club_name"], r["title"]))
-    return rides, boulder_detailed, failures
+    return rides, boulder_detailed, failures, warnings
+
+
+def _norm_title(t):
+    return re.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
+
+
+def finish_rides(rides, cfg):
+    """
+    Final pass over every ride, whatever its source:
+      - assigns the area from the start point, drops rides outside coverage
+      - re-measures distance and unpaved share from the route geometry and uses the
+        measured distance when the source's own figure is missing or off by more than 10 %
+      - validates dates, coordinates and elevation figures
+      - removes duplicates (the same ride published on two platforms)
+    """
+    out, warnings = [], []
+    for r in rides:
+        label = f"{r.get('club_name')} / {r.get('title')} ({r.get('date')})"
+        try:
+            dt.datetime.strptime(r["date"], "%Y-%m-%d %H:%M")
+            start = r.get("starting_location") or (r["route"][0][:2] if r.get("route") else None)
+            lat, lng = float(start[0]), float(start[1])
+        except (KeyError, TypeError, ValueError, IndexError):
+            warnings.append(f"dropped (bad date or start point): {label}")
+            continue
+        region = region_for([lat, lng], cfg)
+        if not region:
+            warnings.append(f"dropped (starts outside coverage): {label}")
+            continue
+        r["region"] = region
+        r["starting_location"] = [round(lat, 5), round(lng, 5)]
+        r.setdefault("id", ride_id(r.get("url"), r.get("route_id"), r["date"]))
+        for key in ("description", "start_name", "start_address"):
+            r.setdefault(key, None)
+        r["route"] = [p for p in (r.get("route") or [])
+                      if len(p) >= 2 and -90 <= p[0] <= 90 and -180 <= p[1] <= 180]
+        measured_m, unpaved_pct = route_metrics(r["route"])
+        r["has_route"] = measured_m is not None
+        r["unpaved_pct"] = unpaved_pct
+        if measured_m is not None:
+            measured_mi = round(measured_m * MI_PER_M, 1)
+            stated = r.get("dist_mi")
+            if stated is None or stated <= 0:
+                r["dist_mi"] = measured_mi
+            elif abs(measured_mi - stated) > max(0.5, 0.10 * stated):
+                warnings.append(f"distance corrected {stated} -> {measured_mi} mi (measured from route): {label}")
+                r["dist_mi"] = measured_mi
+            # start pin more than 2 miles from the route: trust the route
+            off = miles_between(r["starting_location"], r["route"][0][:2])
+            if off > 2 and miles_between(r["starting_location"], r["route"][-1][:2]) > 2:
+                warnings.append(f"start pin was {off:.1f} mi from its route, moved to route start: {label}")
+                r["starting_location"] = [round(r["route"][0][0], 5), round(r["route"][0][1], 5)]
+        else:
+            r["dist_mi"] = r["elev_gain_ft"] = None
+        gain = r.get("elev_gain_ft")
+        if gain is not None and (gain < 0 or (r.get("dist_mi") and gain / r["dist_mi"] > 600)):
+            warnings.append(f"elevation gain {gain} ft looks wrong and was removed: {label}")
+            r["elev_gain_ft"] = None
+        r["ride_type"] = ride_type_for(r["title"], r.get("description") or "", unpaved_pct)
+        r["pace_mph"] = r.get("_speed_mph")
+        out.append(r)
+
+    # duplicates: same start time, same title, start points within ~300 m -> keep the richest
+    best = {}
+    for r in out:
+        key = (r["date"], _norm_title(r["title"]), round(r["starting_location"][0], 2), round(r["starting_location"][1], 2),
+               r.get("route_id") if r["has_route"] else None)
+        loose = key[:4]
+        prev = best.get(loose)
+        if prev is None:
+            best[loose] = r
+        elif prev["has_route"] and r["has_route"] and prev.get("route_id") != r.get("route_id"):
+            best[key] = r  # same event, different route options: keep both
+        elif r["has_route"] and not prev["has_route"]:
+            best[loose] = r
+            warnings.append(f"duplicate removed (kept the listing with a route): {prev['club_name']} / {prev['title']}")
+        else:
+            warnings.append(f"duplicate removed: {r['club_name']} / {r['title']} ({r['source']})")
+    return list(best.values()), warnings
 
 
 def club_directory(cfg, rides):
@@ -593,14 +996,18 @@ def club_directory(cfg, rides):
         if not url:
             if c["source"] == "strava":
                 url = f"https://www.strava.com/clubs/{c['id']}"
+            elif c["source"] == "meetup":
+                url = f"https://www.meetup.com/{c['id']}/"
+            elif c["source"] in ("tribe", "ical"):
+                url = c["id"]
             else:
                 kind = "clubs" if c.get("rwgps_kind") == "club" else "organizations"
                 url = f"{RWGPS}/{kind}/{c['id']}"
-        out.append({"name": c["name"], "url": url, "region": c["region"], "source": c["source"],
+        out.append({"name": c["name"], "url": url, "region": c.get("region", "denver"), "source": c["source"],
                     "active": c["source"] != "strava" or strava_on})
     listed = {c["name"].lower() for c in out}
     for r in rides:  # Boulder clubs that have a ride in the current feed
-        if r.get("region") == "boulder" and r["club_name"].lower() not in listed:
+        if r.get("_feed") and r["club_name"].lower() not in listed:
             listed.add(r["club_name"].lower())
             if r.get("source") == "Strava" and r.get("club_id"):
                 url = f"https://www.strava.com/clubs/{r['club_id']}"
@@ -855,7 +1262,7 @@ def build_detailed_weather(rides, boulder_detailed, interval_min=20):
             out.append(boulder_detailed[key])
             continue
         speed = r.get("_speed_mph")
-        if not speed or not r.get("dist_mi") or r.get("region") == "boulder":
+        if not speed or not r.get("dist_mi") or not r.get("route") or r.get("_feed"):
             out.append(base)
             continue
         try:
@@ -931,9 +1338,19 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     problems = []
 
+    # Geocoder results are kept between runs so each address is only ever looked up once
+    geocache_path = os.path.join(args.out, "geocache.json")
+    if os.path.exists(geocache_path):
+        try:
+            with open(geocache_path, encoding="utf-8") as f:
+                _geocode_cache.update({k: v for k, v in json.load(f).items() if v})
+        except (OSError, ValueError):
+            pass
+
     if "rides" in want:
-        rides, boulder_detailed, failures = build_rides(cfg)
+        rides, boulder_detailed, failures, warnings = build_rides(cfg)
         problems += failures
+        warnings = list(warnings)
         if "detailed" in want:
             try:
                 write_json(os.path.join(args.out, "detailed_weather.json"),
@@ -966,11 +1383,22 @@ def main():
             except Exception as e:  # noqa: BLE001 - keep the previous file on failure
                 problems.append(f"{name}: {e}")
 
-    write_json(os.path.join(args.out, "status.json"), {
+    status = {
         "generated_at": now_local().replace(microsecond=0).isoformat(),
         "strava_enabled": bool(os.environ.get("STRAVA_REFRESH_TOKEN")),
         "problems": problems,
-    })
+    }
+    if "rides" in want:
+        status.update({
+            "rides_total": len(public),
+            "rides_by_region": by_region,
+            "rides_by_source": {k: sum(1 for r in public if r["source"] == k) for k in sorted({r["source"] for r in public})},
+            "rides_without_route": sum(1 for r in public if not r["has_route"]),
+            "checks": warnings,
+        })
+    write_json(os.path.join(args.out, "status.json"), status)
+    if _geocode_cache:
+        write_json(geocache_path, {k: v for k, v in sorted(_geocode_cache.items()) if v})
     if problems:
         log("Problems:\n  " + "\n  ".join(problems))
     return 0

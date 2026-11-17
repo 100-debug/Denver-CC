@@ -1,28 +1,35 @@
-name: Update ride data and deploy site
+name: Update ride data
 
-# Rebuilds data/*.json from Ride with GPS, Strava, the Boulder feed, BikeReg and the
-# National Weather Service, then publishes the site to GitHub Pages.
+# Rebuilds data/*.json several times a day and publishes it on the `data` branch,
+# which is where the site reads its data from. If GitHub Pages is enabled for the
+# repository (Settings -> Pages -> Source: GitHub Actions), the site is deployed too.
 # Scheduled runs only fire on the repository's default branch.
 on:
   schedule:
-    - cron: "17 19 * * *"   # about 12 PM Mountain (1 PM during daylight time)
-    - cron: "17 8 * * *"    # about 1 AM Mountain (2 AM during daylight time)
+    - cron: "23 13 * * *"   # about 6 AM Mountain
+    - cron: "23 18 * * *"   # about 11 AM Mountain
+    - cron: "23 22 * * *"   # about 3 PM Mountain
+    - cron: "23 3 * * *"    # about 8 PM Mountain
   workflow_dispatch:
   push:
-    branches: [main]
+    paths-ignore: ["README.md"]
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
 concurrency:
-  group: pages
+  group: update-data
   cancel-in-progress: false
 
 jobs:
   build:
+    # pushes only trigger a rebuild on the default branch
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
+    outputs:
+      pages: ${{ steps.pages.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,22 +37,21 @@ jobs:
         with:
           python-version: "3.12"
 
-      - id: pages
-        uses: actions/configure-pages@v5
-
       # Start from the data that is live right now, so a source that is down for
       # one run keeps its last good file instead of going blank.
       - name: Restore last published data
         continue-on-error: true
         run: |
-          for f in club_rides races weather detailed_weather clubs; do
-            curl -fsS --max-time 60 -o "data/$f.json.new" "${{ steps.pages.outputs.base_url }}/data/$f.json" \
-              && python3 -c "import json,sys; json.load(open(sys.argv[1]))" "data/$f.json.new" \
-              && mv "data/$f.json.new" "data/$f.json" || rm -f "data/$f.json.new"
-          done
+          if git fetch --depth 1 origin data 2>/dev/null; then
+            for f in club_rides races weather detailed_weather clubs geocache; do
+              git show "FETCH_HEAD:$f.json" > "data/$f.json.new" 2>/dev/null \
+                && python3 -c "import json,sys; json.load(open(sys.argv[1]))" "data/$f.json.new" \
+                && mv "data/$f.json.new" "data/$f.json" || rm -f "data/$f.json.new"
+            done
+          fi
 
       - name: Run backend tests
-        run: python3 -m unittest discover -s backend/tests -v
+        run: python3 -m unittest discover -s backend/tests
 
       - name: Build data
         env:
@@ -54,17 +60,40 @@ jobs:
           STRAVA_REFRESH_TOKEN: ${{ secrets.STRAVA_REFRESH_TOKEN }}
         run: python3 backend/build_data.py
 
+      # One commit, replaced on every run, so the repository does not grow.
+      - name: Publish data branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          rm -rf _data && mkdir _data && cp data/*.json _data/
+          printf '# Data branch\n\nRebuilt automatically by the "Update ride data" workflow. Do not edit by hand.\n' > _data/README.md
+          cd _data
+          git init -q -b data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Ride data $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+
+      # ---- GitHub Pages (skipped quietly until Pages is enabled) ----
+      - id: pages
+        continue-on-error: true
+        uses: actions/configure-pages@v5
+
       - name: Assemble site
+        if: steps.pages.outcome == 'success'
         run: |
           mkdir _site
           cp -r index.html gpx detailed_weather assets data sw.js manifest.json robots.txt LICENSE _site/
 
-      - uses: actions/upload-pages-artifact@v3
+      - if: steps.pages.outcome == 'success'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: _site
 
   deploy:
     needs: build
+    if: needs.build.outputs.pages == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

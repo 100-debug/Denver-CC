@@ -41,14 +41,20 @@
   <!-- Start downloading the ride/race/weather data now, in parallel with MapLibre. Without this, the data
        only starts downloading after the MapLibre script has loaded. This helps with connections that are not super fast -->
   <script>
-    // The data files are served from the site's own data/ folder (rebuilt twice a day by the backend workflow).
-    const DATA_BASE_URL = 'data/';
-    for (const file of ['club_rides.json', 'races.json', 'weather.json']) {
-      const link = document.createElement('link');
-      link.rel = 'preload';
-      link.as = 'fetch';
-      link.href = DATA_BASE_URL + file;
-      document.head.appendChild(link);
+    // Data is rebuilt every day by the backend workflow and published on the repository's 'data' branch.
+    // The site reads it from there, wherever the site itself is hosted. If that is unreachable, it falls
+    // back to the snapshot bundled with the site in data/.
+    const DATA_SOURCES = ['https://raw.githubusercontent.com/100-debug/Denver-CC/data/', 'data/'];
+    async function fetchData(file, options) {
+      let lastError = null;
+      for (const base of DATA_SOURCES) {
+        try {
+          const res = await fetch(base + file, options);
+          if (res.ok) return res;
+          lastError = new Error(base + file + ' -> HTTP ' + res.status);
+        } catch (e) { lastError = e; }
+      }
+      throw lastError;
     }
   </script>
 
@@ -127,8 +133,71 @@
     #info-btn:hover   { background: #0056b3; }
     #races-btn:hover  { background: #0056b3; }
     #gpx-btn:hover    { background: #0056b3; }
-    #region-btn       { background: #007bff; }
-    #region-btn:hover { background: #0056b3; }
+
+    /* Day count badge on calendar days */
+    .day-column { padding: 2px 6px !important; }
+    .day-count { font-size: 0.62em; font-weight: bold; line-height: 1.2; color: #007bff; white-space: nowrap; }
+    .selected .day-count { color: #fff; }
+
+    /* Area filter chips + List button (bottom of the map, right of the menu button) */
+    #area-bar {
+      position: fixed; left: 72px; right: 48px; bottom: 17px; z-index: 900;
+      display: flex; gap: 6px; overflow-x: auto; padding: 3px 2px; scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+    }
+    #area-bar::-webkit-scrollbar { display: none; }
+    .area-chip {
+      flex: 0 0 auto; border: none; border-radius: 18px; padding: 8px 12px; min-height: 36px;
+      font: bold 0.82em Arial, sans-serif; background: #fff; color: #333; cursor: pointer;
+      box-shadow: 0 1px 5px rgba(0,0,0,0.3); -webkit-tap-highlight-color: transparent;
+    }
+    .area-chip.active { background: #007bff; color: #fff; }
+    .area-chip .n { font-weight: normal; opacity: 0.75; margin-left: 4px; }
+    .area-chip:focus-visible, .list-row:focus-visible, .sheet-action:focus-visible { outline: 3px solid #ffbf47; outline-offset: 1px; }
+    @media (pointer: coarse) {
+      #area-bar { transition: opacity 0.2s ease; }
+      body.sheet-open #area-bar { opacity: 0; pointer-events: none; }
+    }
+
+    /* Day list panel */
+    #list-panel {
+      display: none; position: fixed; z-index: 1500; background: #fff; overflow: hidden;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.3); font-family: Arial, sans-serif;
+      left: 16px; top: 150px; bottom: 76px; width: 350px; max-width: calc(100% - 32px); border-radius: 14px;
+      flex-direction: column;
+    }
+    #list-panel.open { display: flex; }
+    #list-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #eee; font-weight: bold; }
+    #list-close { border: none; background: #eee; border-radius: 50%; width: 32px; height: 32px; font-size: 1.1em; cursor: pointer; }
+    #list-body { overflow-y: auto; flex: 1; }
+    .list-row { display: flex; gap: 10px; width: 100%; text-align: left; border: none; background: #fff; padding: 10px 14px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font: inherit; color: #222; }
+    .list-row:hover { background: #f5f9ff; }
+    .list-dot { flex: 0 0 12px; width: 12px; height: 12px; border-radius: 50%; margin-top: 4px; }
+    .list-time { flex: 0 0 62px; font-weight: bold; font-size: 0.85em; color: #007bff; }
+    .list-main { flex: 1; min-width: 0; }
+    .list-club { font-weight: bold; font-size: 0.82em; text-transform: uppercase; }
+    .list-title { font-size: 0.9em; color: #555; overflow-wrap: anywhere; }
+    .list-sub { font-size: 0.75em; color: #888; margin-top: 2px; }
+    .list-empty { padding: 20px 14px; color: #777; font-size: 0.9em; }
+    @media (max-width: 600px) {
+      #list-panel { left: 0; right: 0; top: auto; bottom: 0; width: auto; max-width: none; max-height: 62%; border-radius: 16px 16px 0 0; }
+    }
+
+    /* Extra ride card content */
+    #sheet-where { font-size: 0.85em; color: #444; margin: 0 0 8px; overflow-wrap: anywhere; }
+    #sheet-desc { font-size: 0.82em; color: #666; margin: 0 0 10px; line-height: 1.4; max-height: 5.6em; overflow: hidden; overflow-wrap: anywhere; cursor: pointer; }
+    #sheet-desc.expanded { max-height: none; }
+    #sheet-profile-wrap { margin: 0 0 10px; }
+    #sheet-profile { display: block; width: 100%; height: 46px; }
+    #sheet-profile-label { display: flex; justify-content: space-between; font-size: 0.7em; color: #888; }
+    #sheet-actions { display: flex; gap: 8px; margin: 0 0 10px; }
+    .sheet-action {
+      flex: 1; text-align: center; border: 1px solid #cce0ff; background: #f0f6ff; color: #007bff; border-radius: 10px;
+      padding: 10px 4px; font: bold 0.8em Arial, sans-serif; cursor: pointer; text-decoration: none; box-sizing: border-box;
+    }
+    .sheet-action:active { background: #dbe9ff; }
+    .sheet-badge.muted { background: #f4f4f4; color: #666; border-color: #ddd; }
+    #sheet-body { max-height: 72vh; overflow-y: auto; }
     #metric-btn.active { background: #007bff; }
     #metric-btn:active { transform: scale(0.98); }
 
@@ -297,7 +366,7 @@
 
     @media (pointer: fine) {
       #ride-sheet {
-        left: auto; right: 24px; bottom: 32px; width: max-content; max-width: calc(100% - 48px);
+        left: auto; right: 24px; bottom: 32px; width: 380px; max-width: calc(100% - 48px);
         border-radius: 16px;
         visibility: hidden; opacity: 0; transform: translateY(16px);
         transition: transform 0.2s ease, opacity 0.2s ease, visibility 0.2s;
@@ -516,11 +585,17 @@
   <button id="gpx-btn" class="overlay-btn"
           onclick="window.location.href = 'gpx/'">GPX/List</button> <!-- Opens the GPX route list page (relative path) -->
 
-  <!-- Area filter: cycles All -> Denver -> Boulder -->
-  <button id="region-btn" class="overlay-btn">Area: All</button>
-
           <!-- Metric/Imperial toggle (default: imperial) -->
   <button id="metric-btn" class="overlay-btn">Metric</button>
+</div>
+
+<!-- Area filter chips and the List button -->
+<div id="area-bar" role="group" aria-label="Filter rides by area"></div>
+
+<!-- List of the selected day's rides -->
+<div id="list-panel" role="dialog" aria-label="Rides on the selected day">
+  <div id="list-head"><span id="list-title">Rides</span><button id="list-close" type="button" aria-label="Close list">&times;</button></div>
+  <div id="list-body"></div>
 </div>
 
 <!-- Shared ride details: opens on route click or tap -->
@@ -534,6 +609,17 @@
     </div>
     <div id="sheet-title"></div>
     <div id="sheet-meta"></div>
+    <div id="sheet-where"></div>
+    <div id="sheet-desc" title="Show more"></div>
+    <div id="sheet-profile-wrap" hidden>
+      <svg id="sheet-profile" viewBox="0 0 300 46" preserveAspectRatio="none" role="img" aria-label="Elevation profile"></svg>
+      <div id="sheet-profile-label"><span id="sheet-profile-min"></span><span id="sheet-profile-max"></span></div>
+    </div>
+    <div id="sheet-actions">
+      <button id="sheet-share" class="sheet-action" type="button">Share</button>
+      <a id="sheet-directions" class="sheet-action" target="_blank" rel="noopener noreferrer">Directions</a>
+      <button id="sheet-ics" class="sheet-action" type="button">Add to calendar</button>
+    </div>
     <a id="sheet-source-btn" target="_blank" rel="noopener noreferrer">View on...</a>
     <a id="sheet-weather-btn">Weather</a>
   </div>
@@ -547,7 +633,7 @@
 
     <h1>Denver Group Rides</h1>
     <p>
-      Every group ride you're looking for, all in one place! This site pulls upcoming rides from cycling clubs and shops across metro Denver, plus the Boulder rides published by <a href="https://boulderrides.cc" target="_blank" rel="noopener noreferrer">boulderrides.cc</a>, and displays them on an interactive map.
+      Every group ride you're looking for, all in one place! This site pulls upcoming rides from cycling clubs and shops across metro Denver, Boulder, Fort Collins and Colorado's mountain towns, and displays them on an interactive map. Boulder rides come from <a href="https://boulderrides.cc" target="_blank" rel="noopener noreferrer">boulderrides.cc</a>.
     </p>
     <p style="font-size: 0.9em; color: #888;">
       Free, open source, and modeled on Boulder Group Rides by Roger Bergua, whose MIT-licensed frontend this site is built from. If you find this useful, please support the original project.
@@ -562,7 +648,10 @@
     </p>
 
     <p>
-      A backend process pulls the latest events from Ride with GPS and Strava twice a day (12 PM &amp; 1 AM) and filters them down to rides that begin near Denver. Boulder rides are merged in from the boulderrides.cc public data feed. It requires zero effort from the clubs themselves.
+      A backend process pulls the latest events several times a day from Ride with GPS club pages, Meetup group calendars, the Bicycle Colorado calendar and (once connected) Strava clubs. Boulder rides are merged in from the boulderrides.cc public data feed. It requires zero effort from the clubs themselves.
+    </p>
+    <p>
+      Every ride is checked before it is shown: the distance is re-measured from the route itself, the start point must be in Colorado, and a ride posted on two platforms is listed once. Phone numbers and email addresses are removed from descriptions.
     </p>
 
     <hr>
@@ -577,7 +666,7 @@
     <div id="club-badges" style="display:flex; flex-wrap:wrap; gap:8px; margin:14px 0 16px;"></div>
 
     <p style="font-size:0.8em; color:#666;">
-      <span style="color:#007bff; font-weight:600;">Blue-labeled</span> clubs are Denver-metro clubs: their rides are shown when they start within 35 miles of downtown Denver, which allows for special rides such as Mt. Blue Sky, Golden Gate Canyon, Deckers, etc. <span style="color:#28a745; font-weight:600;">Green-labeled</span> clubs are Boulder clubs, carried over as published by boulderrides.cc. <span style="color:#888; font-weight:600;">Gray-labeled</span> clubs post their rides on Strava and appear on the map once Strava API access is connected. Any rides without a route are excluded.
+      <span style="color:#007bff; font-weight:600;">Blue-labeled</span> sources are pulled directly on every update. <span style="color:#28a745; font-weight:600;">Green-labeled</span> clubs are Boulder clubs, carried over as published by boulderrides.cc. <span style="color:#888; font-weight:600;">Gray-labeled</span> clubs post their rides on Strava and appear on the map once Strava API access is connected. Rides anywhere in Colorado are shown; the area chips group them by where they start.
     </p>
 
     <hr>
@@ -615,7 +704,13 @@
       <strong>Checkered-flag pins</strong> mark upcoming races near Denver and Boulder. Tap the <strong>Races</strong> button to browse them, or click any checkered pin on the map to open the Races page with that event highlighted.
     </p>
     <p>
-      Use the <strong>Area</strong> button to show only Denver rides, only Boulder rides, or both.
+Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort Collins or mountain rides only, and <strong>List</strong> to see the whole day as a list. A ride's area is decided by where it starts.
+    </p>
+    <p>
+      <strong>Share</strong> on a ride card copies a link that opens this map straight on that ride. <strong>Directions</strong> opens the meeting point in Google Maps, and <strong>Add to calendar</strong> saves the ride to your phone or computer calendar.
+    </p>
+    <p>
+      Rides whose organizer posted no route appear as a start pin only and are marked <strong>No route posted</strong>.
     </p>
     <p>
       Use the <strong>Metric</strong> button to display the ride statistics in km/meters and the temperature in °C.
@@ -800,7 +895,7 @@
   async function refreshInfoPageData() {
     infoRefreshedAt = Date.now();
     try {
-      const res = await fetch(DATA_BASE_URL + 'clubs.json', { cache: 'no-cache' });
+      const res = await fetchData('clubs.json', { cache: 'no-cache' });
       const clubs = await res.json();
       const box = document.getElementById('club-badges');
       box.innerHTML = clubs.map(c => {
@@ -810,7 +905,7 @@
       }).join('');
     } catch {}
     try {
-      const res = await fetch(DATA_BASE_URL + 'status.json', { cache: 'no-cache' });
+      const res = await fetchData('status.json', { cache: 'no-cache' });
       const status = await res.json();
       const when = new Date(status.generated_at);
       if (!isNaN(when)) {
@@ -838,9 +933,11 @@
   const DEFAULT_ZOOM = 11;
   // Map view used when an area is selected and the day has nothing to fit to.
   const REGION_VIEWS = {
-    all:     { label: 'All',     center: DEFAULT_CENTER,         zoom: 10 },
-    denver:  { label: 'Denver',  center: DEFAULT_CENTER,         zoom: DEFAULT_ZOOM },
-    boulder: { label: 'Boulder', center: [40.01499, -105.27055], zoom: 12 },
+    all:       { label: 'All',          center: [39.95, -105.15],       zoom: 8.6 },
+    denver:    { label: 'Denver',       center: DEFAULT_CENTER,         zoom: DEFAULT_ZOOM },
+    boulder:   { label: 'Boulder',      center: [40.01499, -105.27055], zoom: 12 },
+    foco:      { label: 'Fort Collins', center: [40.5853, -105.0844],   zoom: 11 },
+    mountains: { label: 'Mountains',    center: [39.55, -106.35],       zoom: 8 },
   };
 
   // ── Event Banner ──────────────────────────────────────────────────────────────
@@ -1094,7 +1191,7 @@
   // Loads initial rides data concurrently and plots them once map is ready
   //console.time('[PERF] app start → club_rides.json ready'); // Debugging performance
   const ridesReady = (async () => {
-    const res = await fetch(DATA_BASE_URL + 'club_rides.json', { cache: 'no-cache' }); // Same URL as the <link rel="preload"> in <head>, so the browser reuses that download. 'no-cache' = check with the server before reusing a saved copy. Refresh interval is 5 min.
+    const res = await fetchData('club_rides.json', { cache: 'no-cache' }); // Same URL as the <link rel="preload"> in <head>, so the browser reuses that download. 'no-cache' = check with the server before reusing a saved copy. Refresh interval is 5 min.
     const rides = await res.json();
     saveSnapshot('club_rides.json', rides); // Store a snapshot of the data for future change detection
     //console.timeEnd('[PERF] app start → club_rides.json ready'); // Debugging performance
@@ -1109,7 +1206,7 @@
   let allRaces = [];
 
   const racesReady = (async () => {
-    const res = await fetch(DATA_BASE_URL + 'races.json', { cache: 'no-cache' }); // See club_rides.json above
+    const res = await fetchData('races.json', { cache: 'no-cache' }); // See club_rides.json above
     allRaces = await res.json();
     saveSnapshot('races.json', allRaces);  // Store a snapshot of the data for future change detection
     setProgress(75, 'Preparing map…');          // Progress bar. Milestone 3: race data ready
@@ -1135,7 +1232,7 @@
   const weatherReady = (async () => {
     if (!ENABLE_WEATHER) return;
     try {
-      const res = await fetch(DATA_BASE_URL + 'weather.json', { cache: 'no-cache' }); // See club_rides.json above
+      const res = await fetchData('weather.json', { cache: 'no-cache' }); // See club_rides.json above
       weatherByDate = await res.json();
       saveSnapshot('weather.json', weatherByDate);  // Store a snapshot of the data for future change detection
     } catch {
@@ -1186,7 +1283,7 @@
   (async () => {
     if (!ENABLE_DETAILED_WEATHER) return;
     try {
-      const res = await fetch(DATA_BASE_URL + 'detailed_weather.json', { cache: 'no-cache' }); // See club_rides.json above
+      const res = await fetchData('detailed_weather.json', { cache: 'no-cache' }); // See club_rides.json above
       const data = await res.json();
       saveSnapshot('detailed_weather.json', data);  // Store a snapshot of the data for future change detection
       applyDetailedWeather(data);
@@ -1249,7 +1346,7 @@
   // Fetches a JSON file, revalidating with the server. Returns null if it could not be fetched.
   async function fetchJson(fileName) {
     try {
-      const res = await fetch(DATA_BASE_URL + fileName, { cache: 'no-cache' });
+      const res = await fetchData(fileName, { cache: 'no-cache' });
       if (!res.ok) return null;
       return await res.json();
     } catch {
@@ -1341,13 +1438,7 @@
       }
 
       // ── Refresh calendar day highlights ───────────────────────────────────
-      if (ridesChanged || races) {
-        document.querySelectorAll('.day-column').forEach(col => {
-          const date    = col.dataset.date;
-          const hasData = (ridesByDate[date]?.length || 0) > 0 || (racesByDate[date]?.length || 0) > 0;
-          col.classList.toggle('ride-day', hasData);
-        });
-      }
+      if (ridesChanged || races) { refreshDayColumns(); renderAreaBar(); }
 
       // ── Re-render selected day only if rides content actually changed ─────
       if (ridesChanged) {
@@ -1427,38 +1518,216 @@
     metricBtn.classList.toggle('active', metricUnits);
     const selected = document.querySelector('.day-column.selected');
     if (selected?.dataset.date) updateWeather(selected.dataset.date);
-    if (selectedRide) renderSheetMeta(selectedRide);
+    if (selectedRide) { renderSheetMeta(selectedRide); renderProfile(selectedRide); }
+    if (listPanel.classList.contains('open')) renderList();
   });
 
-  // Area button: cycles All -> Denver -> Boulder, then re-filters the rides, the calendar highlights and the map.
-  const regionBtn = document.getElementById('region-btn');
-  const REGION_ORDER = ['all', 'denver', 'boulder'];
-  function updateRegionButton() {
-    regionBtn.textContent = 'Area: ' + REGION_VIEWS[regionFilter].label;
-  }
-  updateRegionButton();
-  regionBtn.addEventListener('click', () => {
-    regionFilter = REGION_ORDER[(REGION_ORDER.indexOf(regionFilter) + 1) % REGION_ORDER.length];
-    try { localStorage.setItem('regionFilter', regionFilter); } catch {}
-    updateRegionButton();
-    ridesByDate = groupRides(allRides);
+  // -------------------------------
+  // Area chips, day list, sharing
+  // -------------------------------
+  const REGION_ORDER = ['all', 'denver', 'boulder', 'foco', 'mountains'];
+  const areaBar   = document.getElementById('area-bar');
+  const listPanel = document.getElementById('list-panel');
+  const selectedDate = () => document.querySelector('.day-column.selected')?.dataset.date || null;
+  const sortedRides  = date => [...(ridesByDate[date] || [])].sort((a, b) => a.date.localeCompare(b.date) || a.club_name.localeCompare(b.club_name));
 
+  // Marks which days have rides/races and shows the ride count on each day.
+  function refreshDayColumns() {
     document.querySelectorAll('.day-column').forEach(col => {
-      const date    = col.dataset.date;
-      const hasData = (ridesByDate[date]?.length || 0) > 0 || (racesByDate[date]?.length || 0) > 0;
-      col.classList.toggle('ride-day', hasData);
+      const date  = col.dataset.date;
+      const count = ridesByDate[date]?.length || 0;
+      col.classList.toggle('ride-day', count > 0 || (racesByDate[date]?.length || 0) > 0);
+      let badge = col.querySelector('.day-count');
+      if (count) {
+        if (!badge) { badge = document.createElement('div'); badge.className = 'day-count'; col.appendChild(badge); }
+        badge.textContent = count + (count === 1 ? ' ride' : ' rides');
+        col.setAttribute('aria-label', `${date}, ${count} ride${count === 1 ? '' : 's'}`);
+      } else {
+        badge?.remove();
+        col.setAttribute('aria-label', `${date}, no rides`);
+      }
     });
+  }
 
-    const selected = document.querySelector('.day-column.selected');
-    if (selected?.dataset.date) {
-      loadRoutes(selected.dataset.date);
+  // Builds the chips: one per area (with the selected day's ride count) plus the List button.
+  function renderAreaBar() {
+    const date = selectedDate();
+    const dayRides = allRides.filter(r => r.date.split(' ')[0] === date);
+    areaBar.innerHTML = '';
+    for (const key of REGION_ORDER) {
+      const n = key === 'all' ? dayRides.length : dayRides.filter(r => (r.region || 'denver') === key).length;
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'area-chip' + (key === regionFilter ? ' active' : '');
+      chip.setAttribute('aria-pressed', key === regionFilter);
+      chip.innerHTML = `${REGION_VIEWS[key].label}<span class="n">${n}</span>`;
+      chip.addEventListener('click', () => setRegion(key));
+      areaBar.appendChild(chip);
+    }
+    const listChip = document.createElement('button');
+    listChip.type = 'button';
+    listChip.className = 'area-chip';
+    listChip.textContent = '☰ List';
+    listChip.addEventListener('click', e => { e.stopPropagation(); toggleList(); });
+    areaBar.appendChild(listChip);
+  }
+
+  function setRegion(key, { reload = true } = {}) {
+    regionFilter = key;
+    try { localStorage.setItem('regionFilter', regionFilter); } catch {}
+    ridesByDate = groupRides(allRides);
+    refreshDayColumns();
+    const date = selectedDate();
+    if (reload && date) {
+      loadRoutes(date);
       // Nothing to fit the map to on this day: show the selected area instead
-      if (!(ridesByDate[selected.dataset.date]?.length) && !(racesByDate[selected.dataset.date]?.length)) {
+      if (!(ridesByDate[date]?.length) && !(racesByDate[date]?.length)) {
         const view = REGION_VIEWS[regionFilter];
         map.jumpTo({ center: [view.center[1], view.center[0]], zoom: view.zoom });
       }
     }
+    renderAreaBar();
+    if (listPanel.classList.contains('open')) renderList();
+  }
+
+  // Zooms the map to one ride (its route, or its start pin when no route was posted).
+  function focusRide(ride) {
+    if (ride.route?.length) {
+      let w = Infinity, e = -Infinity, s = Infinity, n = -Infinity;
+      for (const pt of ride.route) { w = Math.min(w, pt[1]); e = Math.max(e, pt[1]); s = Math.min(s, pt[0]); n = Math.max(n, pt[0]); }
+      const mapEl = document.getElementById('map');
+      map.fitBounds([[w, s], [e, n]], { padding: { top: 40, bottom: Math.round(mapEl.clientHeight * (isTouchDevice ? 0.5 : 0.1)), left: 40, right: 40 }, maxZoom: 14 });
+    } else if (ride.starting_location) {
+      map.easeTo({ center: [ride.starting_location[1], ride.starting_location[0]], zoom: Math.max(map.getZoom(), 12.5) });
+    }
+  }
+
+  function renderList() {
+    const date = selectedDate();
+    const rides = sortedRides(date);
+    const body = document.getElementById('list-body');
+    const day = date ? parseLocalDate(date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' }) : '';
+    document.getElementById('list-title').textContent = `${day} · ${rides.length} ride${rides.length === 1 ? '' : 's'}`;
+    body.innerHTML = '';
+    if (!rides.length) {
+      body.innerHTML = `<div class="list-empty">No rides listed for this day${regionFilter === 'all' ? '' : ' in ' + esc(REGION_VIEWS[regionFilter].label)}. Try another day or area.</div>`;
+      return;
+    }
+    for (const ride of rides) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'list-row';
+      const stats = [
+        ride.dist_mi != null ? formatDistance(ride.dist_mi) : '',
+        ride.elev_gain_ft != null ? formatElevation(ride.elev_gain_ft) : '',
+        ride.ride_type ? TYPE_LABELS[ride.ride_type] : '',
+        REGION_VIEWS[ride.region]?.label || '',
+        ride.has_route === false ? 'no route posted' : '',
+      ].filter(Boolean).join(' · ');
+      row.innerHTML = `<span class="list-dot" style="background:${esc(ride.color || '#007bff')}"></span>
+        <span class="list-time">${esc(formatTime12h(ride.date.split(' ')[1]))}</span>
+        <span class="list-main"><div class="list-club">${esc(ride.club_name)}</div><div class="list-title">${esc(ride.title)}</div><div class="list-sub">${esc(stats)}</div></span>`;
+      row.addEventListener('click', () => {
+        if (window.matchMedia('(max-width: 600px)').matches) closeList();
+        ride._select?.();
+        focusRide(ride);
+      });
+      body.appendChild(row);
+    }
+  }
+  function toggleList() { listPanel.classList.contains('open') ? closeList() : (renderList(), listPanel.classList.add('open'), closeMenuPanel()); }
+  function closeList()  { listPanel.classList.remove('open'); }
+  document.getElementById('list-close').addEventListener('click', closeList);
+
+  // Link to the current view: a ride (#ride=<id>) or a day (#day=YYYY-MM-DD). No page reload, no history spam.
+  function setLink(hash) {
+    try { history.replaceState(null, '', hash ? '#' + hash : location.pathname + location.search); } catch {}
+  }
+  const rideLink = ride => location.origin + location.pathname + '#ride=' + encodeURIComponent(ride.id);
+  const rideWhen = ride => parseLocalDate(ride.date.split(' ')[0]).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) + ' ' + formatTime12h(ride.date.split(' ')[1]);
+
+  document.getElementById('sheet-share').addEventListener('click', async () => {
+    if (!selectedRide) return;
+    const url  = rideLink(selectedRide);
+    const text = `${selectedRide.club_name}: ${selectedRide.title}, ${rideWhen(selectedRide)}`;
+    try {
+      if (navigator.share) { await navigator.share({ title: 'Group ride', text, url }); return; }
+      await navigator.clipboard.writeText(`${text}\n${url}`);
+      showRefreshToast('✓ Link copied', 'success');
+    } catch (e) {
+      if (e?.name !== 'AbortError') window.prompt('Copy this link to share the ride:', url);
+    }
   });
+
+  // "Add to calendar": a one-event .ics file. End time = start + distance/pace when both are known, else 2 hours.
+  document.getElementById('sheet-ics').addEventListener('click', () => {
+    const r = selectedRide;
+    if (!r) return;
+    const [d, t] = r.date.split(' ');
+    const stamp = s => s.replace(/[-:]/g, '');
+    const hours = (r.dist_mi && r.pace_mph) ? Math.max(1, r.dist_mi / r.pace_mph) : 2;
+    const end = new Date(new Date(`${d}T${t}:00`).getTime() + hours * 3600e3);
+    const pad = n => String(n).padStart(2, '0');
+    const endLocal = `${end.getFullYear()}${pad(end.getMonth() + 1)}${pad(end.getDate())}T${pad(end.getHours())}${pad(end.getMinutes())}00`;
+    const escIcs = v => String(v ?? '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/([,;])/g, '\\$1');
+    const where = [r.start_name, r.start_address].filter(Boolean).join(', ') || `${r.starting_location[0]}, ${r.starting_location[1]}`;
+    const ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Denver Group Rides//EN', 'BEGIN:VEVENT',
+      `UID:${r.id}@denver-group-rides`, `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}Z`,
+      `DTSTART;TZID=America/Denver:${stamp(d)}T${stamp(t)}00`, `DTEND;TZID=America/Denver:${endLocal}`,
+      `SUMMARY:${escIcs(r.club_name + ': ' + r.title)}`, `LOCATION:${escIcs(where)}`,
+      `GEO:${r.starting_location[0]};${r.starting_location[1]}`,
+      `DESCRIPTION:${escIcs('Confirm details on the organizer page: ' + (r.url || '') + '\nMap: ' + rideLink(r))}`,
+      r.url ? `URL:${r.url}` : '', 'END:VEVENT', 'END:VCALENDAR'].filter(Boolean).join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([ics], { type: 'text/calendar' }));
+    a.download = (r.title.replace(/[^a-z0-9]+/gi, '_').slice(0, 50) || 'ride') + '.ics';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  });
+
+  document.getElementById('sheet-desc').addEventListener('click', e => e.currentTarget.classList.toggle('expanded'));
+
+  const TYPE_LABELS = { road: 'Road', gravel: 'Gravel', mtb: 'MTB' };
+
+  // Start place, description and elevation profile of the open ride card.
+  function renderSheetDetails(ride) {
+    const where = document.getElementById('sheet-where');
+    const place = [ride.start_name, ride.start_address].filter(Boolean).join(' · ');
+    where.textContent = place ? '📍 ' + place : '';
+    where.style.display = place ? '' : 'none';
+
+    const desc = document.getElementById('sheet-desc');
+    desc.classList.remove('expanded');
+    desc.textContent = ride.description || '';
+    desc.style.display = ride.description ? '' : 'none';
+
+    document.getElementById('sheet-directions').href =
+      `https://www.google.com/maps/dir/?api=1&destination=${Number(ride.starting_location[0])},${Number(ride.starting_location[1])}`;
+    renderProfile(ride);
+  }
+
+  // Elevation profile from the route's own altitude points (meters), drawn against distance along the route.
+  function renderProfile(ride) {
+    const wrap = document.getElementById('sheet-profile-wrap');
+    const pts = (ride.route || []).filter(p => p[2] != null);
+    if (pts.length < 20) { wrap.hidden = true; return; }
+    let lo = Infinity, hi = -Infinity, dist = 0;
+    const xs = [0];
+    for (let i = 0; i < pts.length; i++) {
+      lo = Math.min(lo, pts[i][2]); hi = Math.max(hi, pts[i][2]);
+      if (i) { dist += distanceMeters(pts[i - 1], pts[i]); xs.push(dist); }
+    }
+    if (hi - lo < 10 || !dist) { wrap.hidden = true; return; }
+    const W = 300, H = 46;
+    const line = pts.map((p, i) => `${(xs[i] / dist * W).toFixed(1)},${(H - 2 - (p[2] - lo) / (hi - lo) * (H - 6)).toFixed(1)}`).join(' L');
+    const color = esc(ride.color || '#007bff');
+    document.getElementById('sheet-profile').innerHTML =
+      `<path d="M0,${H} L${line} L${W},${H} Z" fill="${color}" fill-opacity="0.15"/><path d="M${line}" fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`;
+    const fmt = m => metricUnits ? Math.round(m).toLocaleString() + ' m' : Math.round(m * 3.28084).toLocaleString() + ' ft';
+    document.getElementById('sheet-profile-min').textContent = 'Low ' + fmt(lo);
+    document.getElementById('sheet-profile-max').textContent = 'High ' + fmt(hi);
+    wrap.hidden = false;
+  }
 
   document.getElementById('sheet-close').addEventListener('click', closeSheet);
   document.addEventListener('keydown', e => {
@@ -1488,7 +1757,10 @@
     sheetClub.textContent      = ride.club_name;
     sheetTitle.textContent     = ride.title;
     renderSheetMeta(ride);
+    renderSheetDetails(ride);
     updateSheetWeather(ride);
+    document.body.classList.add('sheet-open');
+    if (ride.id) setLink('ride=' + encodeURIComponent(ride.id));
 
     // Wire up the source button
     sheetBtn.textContent = `View on ${ride.source}`;
@@ -1524,6 +1796,11 @@
     }
 
     if (ride.women_only) addBadge("Women only", "women");
+    if (ride.ride_type) addBadge(TYPE_LABELS[ride.ride_type]);
+    if (ride.unpaved_pct > 0) addBadge(`${ride.unpaved_pct}% unpaved`);
+    if (ride.pace_mph) addBadge('Pace ' + (metricUnits ? (ride.pace_mph * 1.609344).toFixed(0) + ' km/h' : ride.pace_mph + ' mph'));
+    if (REGION_VIEWS[ride.region]) addBadge(REGION_VIEWS[ride.region].label, 'muted');
+    if (ride.has_route === false) addBadge('No route posted', 'muted');
   }
 
   function updateSheetWeather(ride) {
@@ -1597,6 +1874,8 @@
     if (sheet.contains(document.activeElement)) map.getCanvas().focus({ preventScroll: true });
     sheet.inert = true;
     sheet.classList.remove("open");
+    document.body.classList.remove('sheet-open');
+    if (selectedRide && selectedDate()) setLink('day=' + selectedDate());
     selectedRide = null;
     menuToggleBtn.classList.remove("sheet-open");
     document.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('hidden');
@@ -1870,6 +2149,7 @@
   // Click/tap selects a ride; desktop hover provides a preview when none is selected.
   function loadRoutes(date) {
     closeSheet();
+    closeList();
 	restoreAllRoutes = null; // Stop trying to restore routes from the previous day.
     rideHitLayerIds.clear();
 
@@ -2001,6 +2281,7 @@
         map.setPaintProperty(id, prop + '-transition', { duration: 0, delay: 0 }, { validate: false });
         map.setPaintProperty(id, prop, value, { validate: false });
       });
+      changes = changes.filter(c => c.id); // rides without a route have no line/arrow layers
       typeof map.style.batch === 'function' ? map.style.batch(apply) : apply();
     }
 
@@ -2015,7 +2296,7 @@
           // over every other route where paths overlap (white base → line → arrow).
           l.whitelines.forEach(id => map.moveLayer(id));
           l.segmentLines.forEach(id => map.moveLayer(id));
-          map.moveLayer(l.arrowLayer);
+          if (l.arrowLayer) map.moveLayer(l.arrowLayer);
 
           // Active route: thicker and fully opaque, keep its own color
           l.segmentLines.forEach(id => {
@@ -2070,7 +2351,7 @@
       allVisibleLayers.forEach(l => {
         l.whitelines.forEach(id => map.moveLayer(id));
         l.segmentLines.forEach(id => map.moveLayer(id));
-        map.moveLayer(l.arrowLayer);
+        if (l.arrowLayer) map.moveLayer(l.arrowLayer);
       });
 
       const changes = [];
@@ -2159,8 +2440,45 @@
     }
 
     // Per-ride rendering
+    // Rides whose organizer posted no route: a start pin only (same card, list and sharing as any other ride).
+    function addPinOnlyRide(ride) {
+      if (!ride.starting_location) return;
+      const color = ride.women_only
+        ? womenColors[womenIdx++ % womenColors.length]
+        : colors[regularIdx++ % colors.length];
+      ride.color = color;
+      const start    = ride._offset_start || ride.starting_location;
+      const markerEl = createPinMarker([start[1], start[0]], color).addTo(map);
+      map._routeMarkers.push(markerEl);
+      const segmentLines = [];
+      allVisibleLayers.push({ segmentLines, whitelines: [], arrowLayer: null, marker: markerEl, color, isMobile: isTouchDevice });
+      const selectRide = () => {
+        restoreAllRoutes();
+        highlightRoute(segmentLines);
+        currentHL = segmentLines;
+        openSheet(ride);
+      };
+      ride._select = selectRide;
+      const el = markerEl.getElement();
+      el.addEventListener('click', e => { e.stopPropagation(); selectRide(); });
+      if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+        el.addEventListener('mouseenter', () => {
+          if (currentHL) return;
+          highlightRoute(segmentLines);
+          if (activePopup) activePopup.remove();
+          activePopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, className: 'ride-tooltip', maxWidth: 'none' })
+            .setLngLat(markerEl.getLngLat()).setHTML(buildTooltipHTML(ride, formatTime12h(ride.date.split(" ")[1]))).addTo(map);
+        });
+        el.addEventListener('mouseleave', () => {
+          if (currentHL) return;
+          restoreAllRoutes();
+          if (activePopup) { activePopup.remove(); activePopup = null; }
+        });
+      }
+    }
+
     routes.forEach(ride => {
-      if (!ride.route?.length) return; // skip empty routes
+      if (!ride.route?.length) { addPinOnlyRide(ride); return; }
 
       const color = ride.women_only
         ? womenColors[womenIdx++ % womenColors.length]
@@ -2285,6 +2603,7 @@
         currentHL = segmentLines;
         openSheet(ride);
       };
+      ride._select = selectRide; // lets the day list and shared links open this ride
 
       // Registers a listener on this ride's hit layer and tracks it so the next loadRoutes() can remove it.
       const onHitLayer = (type, handler) => {
@@ -2351,6 +2670,13 @@
 
     // Routes
     routes.forEach(ride => {
+      if (!ride.route?.length && ride.starting_location) {
+        const [lat, lng] = ride.starting_location;
+        if (lng < minLng) minLng = lng;
+        if (lng > maxLng) maxLng = lng;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      }
       ride.route?.forEach(pt => {
         const lat = pt[0];
         const lng = pt[1];
@@ -2404,6 +2730,8 @@
         ${badge(rideTime)}
         ${distElev ? badge(distElev) : ''}
         ${ride.women_only ? badge('Women only', 'women') : ''}
+        ${ride.ride_type ? badge(TYPE_LABELS[ride.ride_type]) : ''}
+        ${ride.has_route === false ? badge('No route posted') : ''}
       </div>`;
   }
 
@@ -2572,6 +2900,21 @@
   function generateCalendar() {
     const calendarDiv = document.getElementById("calendar");
     const today       = new Date();
+
+    // Shared link? #ride=<id> opens that ride, #day=YYYY-MM-DD opens that day.
+    const link     = new URLSearchParams(location.hash.slice(1));
+    const linkRide = link.get('ride') ? allRides.find(r => r.id === link.get('ride')) : null;
+    const linkDate = linkRide ? linkRide.date.split(' ')[0] : link.get('day');
+    if (linkRide && regionFilter !== 'all' && (linkRide.region || 'denver') !== regionFilter) {
+      regionFilter = 'all';               // make sure the shared ride is not filtered out
+      ridesByDate  = groupRides(allRides);
+    }
+    // A remembered area with nothing in it this week would look like an empty site: show everything instead.
+    if (regionFilter !== 'all' && !Object.keys(ridesByDate).length && allRides.length) {
+      regionFilter = 'all';
+      ridesByDate  = groupRides(allRides);
+    }
+    let linkCol = null;
     const WEEKDAYS    = ["SUN","MON","TUE","WED","THU","FRI","SAT"];
     let firstRideDate = null;
     let firstRideCol = null;
@@ -2598,10 +2941,15 @@
       dateDiv.innerText = `(${date.toLocaleString('en-US', { month: 'short', day: 'numeric' })})`;
 
       col.append(nameDiv, dateDiv);
+      col.setAttribute('role', 'button');
+      col.tabIndex = 0;
+      col.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); col.click(); } };
       col.onclick = () => {
         document.querySelectorAll('.day-column').forEach(el => el.classList.remove('selected'));
         col.classList.add('selected');
-        loadRoutes(isoDate); // For a given day, this re-calls loadRoutes() and buildSegments() that includes the paved/unpaved logic. But it's a very fast operation (small dataset).
+        setLink('day=' + isoDate);
+        loadRoutes(isoDate);
+        renderAreaBar(); // For a given day, this re-calls loadRoutes() and buildSegments() that includes the paved/unpaved logic. But it's a very fast operation (small dataset).
         updateWeather(isoDate);
       };
 
@@ -2609,17 +2957,36 @@
         firstRideDate = isoDate;
         firstRideCol  = col;
       }
+      if (isoDate === linkDate) linkCol = col;
 
       calendarDiv.appendChild(col);
     }
 
-    // Auto-select the first day that has rides, or fall back to default map view
+    // Open the shared day if the link names one; otherwise auto-select the first day that has rides,
+    // or fall back to the default map view
+    if (linkCol) { firstRideCol = linkCol; firstRideDate = linkDate; }
     if (firstRideDate) {
       firstRideCol.classList.add('selected');
       loadRoutes(firstRideDate);
       updateWeather(firstRideDate);
     } else {
+      // Nothing listed this week: select today so the weather, chips and list still make sense
+      const todayCol = calendarDiv.querySelector('.day-column');
+      todayCol?.classList.add('selected');
+      if (todayCol) updateWeather(todayCol.dataset.date);
       map.jumpTo({ center: [DEFAULT_CENTER[1], DEFAULT_CENTER[0]], zoom: DEFAULT_ZOOM });
+    }
+    refreshDayColumns();
+    renderAreaBar();
+
+    if (link.get('ride')) {
+      if (linkRide && linkCol) {
+        linkRide._select?.();
+        focusRide(linkRide);
+      } else {
+        showRefreshToast('That ride is no longer listed', 'error');
+        setLink('');
+      }
     }
   }
 

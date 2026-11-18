@@ -362,6 +362,32 @@ EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 RWGPS_ROUTE_LINK = re.compile(r"ridewithgps\.com/routes/(\d+)")
 
 
+URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
+SIGNUP_HOSTS = re.compile(r"eventbrite\.|bikereg\.com|runsignup\.com|signupgenius\.com|ticketleap\.|tix\.|humanitix\.", re.I)
+WAIVER_WORDS = re.compile(r"waiver", re.I)
+SIGNUP_WORDS = re.compile(r"\bregist(er|ration)\b|\bsign[- ]?up\b|\brsvp\b|\btickets?\b|\breserve (a|your) spot\b", re.I)
+
+
+def signup_link(text):
+    """
+    A registration or waiver link the organizer put in the event description, as
+    (url, label), or (None, None). A link only counts when the words right before it
+    (or the site it points to) say it is for signing up, registering or a waiver.
+    """
+    raw = html.unescape(text or "")
+    found = None
+    for m in URL_RE.finditer(raw):
+        url = m.group(0).rstrip(".,;:!?")
+        before = raw[max(0, m.start() - 90):m.start()]
+        # only the sentence the link sits in
+        before = re.split(r"[.!?]\s|\n\s*\n", before)[-1]
+        if WAIVER_WORDS.search(before) or "waiver" in url.lower():
+            return url, "Sign the waiver"
+        if found is None and (SIGNUP_WORDS.search(before) or SIGNUP_HOSTS.search(url)):
+            found = (url, "Register")
+    return found or (None, None)
+
+
 def clean_text(text, limit=600):
     """Plain text from an event description: no HTML/markdown links, no phone numbers or emails."""
     t = html.unescape(re.sub(r"<[^>]+>", " ", text or ""))
@@ -418,6 +444,8 @@ def make_ride(source, club, title, start_dt, url, start, route_id, dist_m, gain_
         "club_name": club["name"],
         "region": club.get("region"),  # replaced by the geographic region in finish_ride()
         "description": clean_text(desc),
+        "signup_url": signup_link(desc)[0],
+        "signup_label": signup_link(desc)[1],
         "start_name": (place or "").strip() or None,
         "start_address": (address or "").strip() or None,
         "title": title.strip(),
@@ -1018,7 +1046,7 @@ def finish_rides(rides, cfg):
         r["region"] = region
         r["starting_location"] = [round(lat, 5), round(lng, 5)]
         r.setdefault("id", ride_id(r.get("url"), r.get("route_id"), r["date"]))
-        for key in ("description", "start_name", "start_address"):
+        for key in ("description", "start_name", "start_address", "signup_url", "signup_label"):
             r.setdefault(key, None)
         r["route"] = [p for p in (r.get("route") or [])
                       if len(p) >= 2 and -90 <= p[0] <= 90 and -180 <= p[1] <= 180]

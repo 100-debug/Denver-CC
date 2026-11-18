@@ -147,6 +147,17 @@ class Helpers(unittest.TestCase):
         self.assertFalse(b.title_ok({"title_match": "^RIDE"}, "TRAIL BUILDING: Heil"))
         self.assertTrue(b.title_ok({}, "anything"))
 
+    def test_signup_link(self):
+        d = ("No-drop ride. Please read & sign our ride waiver before joining: https://form.jotform.com/90236806228154\n\n"
+             "Interested in leading or sweeping our rides? Fill out this intake form: https://forms.gle/abc")
+        self.assertEqual(b.signup_link(d), ("https://form.jotform.com/90236806228154", "Sign the waiver"))
+        self.assertEqual(b.signup_link("Space is limited, register here: https://example.org/r/12."),
+                         ("https://example.org/r/12", "Register"))
+        self.assertEqual(b.signup_link("Tickets at https://www.eventbrite.com/e/123"), ("https://www.eventbrite.com/e/123", "Register"))
+        # a route link or a club homepage is not a sign-up link
+        self.assertEqual(b.signup_link("Route: https://ridewithgps.com/routes/1 More at https://club.example.org"), (None, None))
+        self.assertEqual(b.signup_link(None), (None, None))
+
     def test_find_venue(self):
         data = {"props": {"a": [{"venue": {"name": "Park", "lat": 39.7, "lng": -105.2, "address": "1 Main"}}]}}
         self.assertEqual(b._find_venue(data)["name"], "Park")

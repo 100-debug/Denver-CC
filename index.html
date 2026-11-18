@@ -723,6 +723,29 @@
     #loading-bar-track { height: 4px; border-radius: 2px; background: var(--fill-2); }
     #loading-bar-fill { background: var(--tint) !important; border-radius: 2px; }
 
+    /* ---- Add to calendar chooser and sign-up button ---- */
+    #sheet-cal-options { margin: 0 0 10px; border-radius: 14px; overflow: hidden; background: var(--fill); }
+    #sheet-cal-options[hidden], #sheet-signup-btn[hidden] { display: none; }
+    .cal-option {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 46px; box-sizing: border-box;
+      padding: 0 14px; border: none; border-bottom: 0.5px solid var(--separator); background: transparent; cursor: pointer;
+      font: 500 0.92em var(--font); color: var(--tint); text-decoration: none; text-align: left;
+    }
+    .cal-option:last-child { border-bottom: none; }
+    .cal-option span { font-size: 0.82em; font-weight: 400; color: var(--label-2); }
+    .cal-option:focus-visible, #sheet-signup-btn:focus-visible, #sheet-source-btn:focus-visible { outline: 3px solid #ffbf47; outline-offset: 1px; }
+    #sheet-signup-btn {
+      display: block; box-sizing: border-box; width: 100%; margin: 0 0 8px; padding: 14px; border-radius: 14px; text-align: center;
+      background: #34c759; color: #fff; font: 600 1.02em var(--font); text-decoration: none;
+    }
+    #sheet-signup-btn:active { background: #2aa74b; transform: scale(0.97); }
+    .race-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }
+    .race-actions a, .race-actions button {
+      border: none; cursor: pointer; text-decoration: none; border-radius: 10px; padding: 8px 12px;
+      font: 600 0.85em var(--font); background: var(--tint-soft); color: var(--tint);
+    }
+    .race-actions a.primary { background: var(--tint); color: #fff !important; }
+
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation: none !important; transition: none !important; }
     }
@@ -828,11 +851,16 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11l18-8-8 18-2-8z"/></svg>
         <span>Directions</span>
       </a>
-      <button id="sheet-ics" class="sheet-action" type="button">
+      <button id="sheet-ics" class="sheet-action" type="button" aria-expanded="false" aria-controls="sheet-cal-options">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M12 13v5M9.5 15.5h5"/></svg>
-        <span>Calendar</span>
+        <span>Add to calendar</span>
       </button>
     </div>
+    <div id="sheet-cal-options" hidden>
+      <button id="sheet-cal-ics" class="cal-option" type="button">Apple Calendar or Outlook<span>Downloads a calendar file</span></button>
+      <a id="sheet-cal-google" class="cal-option" target="_blank" rel="noopener noreferrer">Google Calendar<span>Opens in a new tab</span></a>
+    </div>
+    <a id="sheet-signup-btn" target="_blank" rel="noopener noreferrer" hidden></a>
     <a id="sheet-source-btn" target="_blank" rel="noopener noreferrer">View on...</a>
     <a id="sheet-weather-btn">Weather</a>
   </div>
@@ -920,7 +948,7 @@
 Use the <strong>area picker</strong> at the bottom to show Denver, Boulder, Fort Collins or mountain rides only, and <strong>List</strong> to see the whole day as a list. A ride's area is decided by where it starts.
     </p>
     <p>
-      <strong>Share</strong> on a ride card copies a link that opens this map straight on that ride. <strong>Directions</strong> opens the meeting point in Google Maps, and <strong>Add to calendar</strong> saves the ride to your phone or computer calendar.
+      <strong>Share</strong> on a ride card copies a link that opens this map straight on that ride. <strong>Directions</strong> opens the meeting point in Google Maps, and <strong>Add to calendar</strong> saves the ride to Apple Calendar, Outlook or Google Calendar. The button at the bottom of the card opens the organizer's own event page, which is where you join or RSVP; when the organizer posted a registration or waiver link, a green button for it appears above.
     </p>
     <p>
       Rides whose organizer posted no route appear as a start pin only and are marked <strong>No route posted</strong>.
@@ -1885,35 +1913,93 @@ Use the <strong>area picker</strong> at the bottom to show Denver, Boulder, Fort
     }
   });
 
-  // "Add to calendar": a one-event .ics file. End time = start + distance/pace when both are known, else 2 hours.
-  document.getElementById('sheet-ics').addEventListener('click', () => {
-    const r = selectedRide;
-    if (!r) return;
+  // -------------------------------
+  // Add to calendar
+  // -------------------------------
+  // Calendar details for a ride. End time = start + distance/pace when both are known, else 2 hours.
+  const pad2 = n => String(n).padStart(2, '0');
+  const localStamp = d => `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}T${pad2(d.getHours())}${pad2(d.getMinutes())}00`;
+  function rideCalendarEvent(r) {
     const [d, t] = r.date.split(' ');
-    const stamp = s => s.replace(/[-:]/g, '');
     const hours = (r.dist_mi && r.pace_mph) ? Math.max(1, r.dist_mi / r.pace_mph) : 2;
-    const end = new Date(new Date(`${d}T${t}:00`).getTime() + hours * 3600e3);
-    const pad = n => String(n).padStart(2, '0');
-    const endLocal = `${end.getFullYear()}${pad(end.getMonth() + 1)}${pad(end.getDate())}T${pad(end.getHours())}${pad(end.getMinutes())}00`;
+    // Wall-clock arithmetic only: the ride's own date and time are Mountain time and are written out as such
+    const start = new Date(`${d}T${t}:00`);
+    const end   = new Date(start.getTime() + hours * 3600e3);
+    const stats = [r.dist_mi != null ? r.dist_mi + ' mi' : '', r.elev_gain_ft != null ? r.elev_gain_ft.toLocaleString('en-US') + ' ft climbing' : ''].filter(Boolean).join(', ');
+    return {
+      uid:   `${r.id}@denver-group-rides`,
+      title: `${r.club_name}: ${r.title}`,
+      start: localStamp(start), end: localStamp(end), allDay: false,
+      where: [r.start_name, r.start_address].filter(Boolean).join(', ') || `${r.starting_location[0]}, ${r.starting_location[1]}`,
+      geo:   r.starting_location,
+      url:   r.url || '',
+      details: [stats, r.signup_url ? `${r.signup_label || 'Sign up'}: ${r.signup_url}` : '',
+                'Confirm details on the organizer page: ' + (r.url || ''), 'Map: ' + rideLink(r)].filter(Boolean).join('\n'),
+      file:  r.title,
+    };
+  }
+  // Calendar details for a race or event (all-day; multi-day events span their first to last date).
+  function raceCalendarEvent(race) {
+    const dates = Array.isArray(race.date) ? race.date : [race.date];
+    const last  = parseLocalDate(dates.at(-1));
+    last.setDate(last.getDate() + 1); // all-day end dates are exclusive
+    const stamp = d => `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`;
+    return {
+      uid:   `race-${race.name.replace(/[^a-z0-9]+/gi, '-')}-${dates[0]}@denver-group-rides`,
+      title: race.name, start: stamp(parseLocalDate(dates[0])), end: stamp(last), allDay: true,
+      where: race.location ? race.location + ', CO' : '', geo: [Number(race.latitude), Number(race.longitude)],
+      url:   race.reg_link || race.url || '',
+      details: [(Array.isArray(race.type) ? race.type.join(', ') : race.type) || '', race.reg_link ? 'Register: ' + race.reg_link : '', race.url ? 'Event site: ' + race.url : ''].filter(Boolean).join('\n'),
+      file:  race.name,
+    };
+  }
+  function downloadIcs(ev) {
     const escIcs = v => String(v ?? '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/([,;])/g, '\\$1');
-    const where = [r.start_name, r.start_address].filter(Boolean).join(', ') || `${r.starting_location[0]}, ${r.starting_location[1]}`;
+    const when = ev.allDay
+      ? [`DTSTART;VALUE=DATE:${ev.start}`, `DTEND;VALUE=DATE:${ev.end}`]
+      : [`DTSTART;TZID=America/Denver:${ev.start}`, `DTEND;TZID=America/Denver:${ev.end}`];
     const ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Denver Group Rides//EN', 'BEGIN:VEVENT',
-      `UID:${r.id}@denver-group-rides`, `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}Z`,
-      `DTSTART;TZID=America/Denver:${stamp(d)}T${stamp(t)}00`, `DTEND;TZID=America/Denver:${endLocal}`,
-      `SUMMARY:${escIcs(r.club_name + ': ' + r.title)}`, `LOCATION:${escIcs(where)}`,
-      `GEO:${r.starting_location[0]};${r.starting_location[1]}`,
-      `DESCRIPTION:${escIcs('Confirm details on the organizer page: ' + (r.url || '') + '\nMap: ' + rideLink(r))}`,
-      r.url ? `URL:${r.url}` : '', 'END:VEVENT', 'END:VCALENDAR'].filter(Boolean).join('\r\n');
+      `UID:${ev.uid}`, `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}Z`, ...when,
+      `SUMMARY:${escIcs(ev.title)}`, ev.where ? `LOCATION:${escIcs(ev.where)}` : '',
+      (ev.geo && isFinite(ev.geo[0]) && isFinite(ev.geo[1])) ? `GEO:${ev.geo[0]};${ev.geo[1]}` : '',
+      `DESCRIPTION:${escIcs(ev.details)}`, /^https?:/i.test(ev.url) ? `URL:${ev.url}` : '',
+      'END:VEVENT', 'END:VCALENDAR'].filter(Boolean).join('\r\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([ics], { type: 'text/calendar' }));
-    a.download = (r.title.replace(/[^a-z0-9]+/gi, '_').slice(0, 50) || 'ride') + '.ics';
+    a.download = (ev.file.replace(/[^a-z0-9]+/gi, '_').slice(0, 50) || 'event') + '.ics';
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  function googleCalendarUrl(ev) {
+    const q = new URLSearchParams({ action: 'TEMPLATE', text: ev.title, dates: `${ev.start}/${ev.end}`, details: ev.details, location: ev.where });
+    if (!ev.allDay) q.set('ctz', 'America/Denver');
+    return 'https://calendar.google.com/calendar/render?' + q.toString();
+  }
+
+  // The Add to calendar button opens a two-way choice under the buttons.
+  const calOptions = document.getElementById('sheet-cal-options');
+  const calToggle  = document.getElementById('sheet-ics');
+  function setCalOptions(open) {
+    calOptions.hidden = !open;
+    calToggle.setAttribute('aria-expanded', open);
+    if (open && selectedRide) document.getElementById('sheet-cal-google').href = googleCalendarUrl(rideCalendarEvent(selectedRide));
+  }
+  calToggle.addEventListener('click', () => setCalOptions(calOptions.hidden));
+  document.getElementById('sheet-cal-ics').addEventListener('click', () => {
+    if (selectedRide) downloadIcs(rideCalendarEvent(selectedRide));
+    setCalOptions(false);
   });
+  document.getElementById('sheet-cal-google').addEventListener('click', () => setTimeout(() => setCalOptions(false), 300));
 
   document.getElementById('sheet-desc').addEventListener('click', e => e.currentTarget.classList.toggle('expanded'));
 
   const TYPE_LABELS = { road: 'Road', gravel: 'Gravel', mtb: 'MTB' };
+  // Where you actually join each kind of ride: the organizer's own event page.
+  const SOURCE_ACTIONS = {
+    'Strava':        'Join on Strava',
+    'Meetup':        'RSVP on Meetup',
+    'Ride with GPS': 'Sign up on Ride with GPS',
+  };
 
   // Start place, description and elevation profile of the open ride card.
   function renderSheetDetails(ride) {
@@ -1989,7 +2075,17 @@ Use the <strong>area picker</strong> at the bottom to show Denver, Boulder, Fort
     if (ride.id) setLink('ride=' + encodeURIComponent(ride.id));
 
     // Wire up the source button
-    sheetBtn.textContent = `View on ${ride.source}`;
+    sheetBtn.textContent = SOURCE_ACTIONS[ride.source] || `Event page: ${ride.source}`;
+    setCalOptions(false);
+    const signupBtn = document.getElementById('sheet-signup-btn');
+    if (ride.signup_url && /^https?:\/\//i.test(ride.signup_url)) {
+      signupBtn.href = ride.signup_url;
+      signupBtn.textContent = ride.signup_label || 'Sign up';
+      signupBtn.hidden = false;
+    } else {
+      signupBtn.hidden = true;
+      signupBtn.removeAttribute('href');
+    }
     if (ride.url) { sheetBtn.href = ride.url; sheetBtn.classList.remove("no-url"); }
     else          { sheetBtn.removeAttribute("href"); sheetBtn.classList.add("no-url"); }
 
@@ -3096,16 +3192,18 @@ Use the <strong>area picker</strong> at the bottom to show Denver, Boulder, Fort
           </a>
         </p>
 
-        <!-- Registration link -->
-        <p style="margin:0 0 10px; font-size:0.9em;">
-          📝
-          <a href="${safeUrl(race.reg_link)}" target="_blank" rel="noopener noreferrer">
-            Register
-          </a>
-        </p>
+        <!-- Sign up + add to calendar -->
+        <div class="race-actions">
+          ${race.reg_link ? `<a class="primary" href="${safeUrl(race.reg_link)}" target="_blank" rel="noopener noreferrer">Register</a>` : ''}
+          <button type="button" class="race-ics">Add to calendar</button>
+          <a class="race-gcal" target="_blank" rel="noopener noreferrer">Google Calendar</a>
+        </div>
       </div>
 
     `;
+
+    div.querySelector('.race-ics').addEventListener('click', () => downloadIcs(raceCalendarEvent(race)));
+    div.querySelector('.race-gcal').href = googleCalendarUrl(raceCalendarEvent(race));
 
     // Return completed race card element
     return div;

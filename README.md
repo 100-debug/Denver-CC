@@ -18,7 +18,8 @@ pull club rides onto a live map.
 - **Ride card**: club, time, distance, elevation gain, elevation profile, ride type, unpaved share, stated pace,
   meeting point, description, and a link to the organizer's event page
 - **Share**: a link that opens the map on one specific ride (`#ride=<id>`) or day (`#day=YYYY-MM-DD`)
-- **Directions** to the meeting point and **Add to calendar** (.ics)
+- **Directions** to the meeting point and **Add to calendar** (Apple Calendar / Outlook file, or Google Calendar), for rides and for races
+- **Sign up**: the main button opens the organizer's own event page (Join on Strava, RSVP on Meetup, Sign up on Ride with GPS); a registration or waiver link found in the description gets its own button; races link to their registration page
 - Rides with no posted route still appear, as a start pin marked "No route posted"
 - **Races & Events** page and checkered pins, from BikeReg
 - **Weather**: downtown Denver forecast per day, plus forecast along the route when the pace is known
@@ -118,7 +119,7 @@ Same formats as boulderrides.cc, with added fields.
 
 - `club_rides.json`: `id`, `source`, `club_id`, `club_name`, `region` (`denver`, `boulder`, `foco`, `mountains`),
   `title`, `date` (`YYYY-MM-DD HH:MM`, Mountain time), `url`, `starting_location`, `start_name`, `start_address`,
-  `description`, `women_only`, `route_id`, `has_route`, `dist_mi`, `elev_gain_ft`, `unpaved_pct`, `ride_type`,
+  `description`, `signup_url`, `signup_label`, `women_only`, `route_id`, `has_route`, `dist_mi`, `elev_gain_ft`, `unpaved_pct`, `ride_type`,
   `pace_mph`, `route` (`[lat, lng, altitude_m, surface]`, surface `1` paved, `0` unpaved, `null` unknown; empty when no route was posted)
 - `races.json`: `name`, `url`, `reg_link`, `location`, `latitude`, `longitude`, `region`, `type`, `date`
 - `weather.json`: per date, two time slots with `temperature_F`, `description`, `symbol`

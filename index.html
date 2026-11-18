@@ -17,7 +17,7 @@
   <meta name="description" content="Find group rides across metro Denver and Boulder on one interactive map, updated twice daily from Strava and Ride with GPS.">
 
   <!-- Viewport -->
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 
   <!-- Progressive Web App: : makes the site installable and feel like a native app -->
   <link rel="manifest" href="manifest.json">
@@ -25,6 +25,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes"> <!-- iOS -->
   <meta name="apple-mobile-web-app-title" content="Denver Rides">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#ffffff">
 
   <!-- Favicon -->
   <link rel="icon" type="image/svg+xml" href="assets/icons/icon.svg">
@@ -522,6 +523,209 @@
       border: none !important;
     }
 
+
+    /* ==========================================================================
+       iOS-style theme
+       Layered on top of the rules above: system font, iOS colors, frosted-glass
+       surfaces, large tap targets, safe-area insets. Colors and radii live in the
+       variables below.
+       ========================================================================== */
+    :root {
+      --tint: #007aff;            /* iOS system blue */
+      --tint-soft: rgba(0, 122, 255, 0.12);
+      --label: #1c1c1e;
+      --label-2: rgba(60, 60, 67, 0.72);
+      --label-3: rgba(60, 60, 67, 0.5);
+      --fill: rgba(118, 118, 128, 0.12);
+      --fill-2: rgba(118, 118, 128, 0.2);
+      --separator: rgba(60, 60, 67, 0.16);
+      --glass: rgba(255, 255, 255, 0.88);
+      --glass-blur: saturate(180%) blur(20px);
+      --shadow: 0 4px 24px rgba(0, 0, 0, 0.14), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Segoe UI", Roboto, Arial, sans-serif;
+    }
+    html, body, button, input, #sheet-body, #list-panel, #weather-widget, .ride-tooltip { font-family: var(--font) !important; }
+    body { color: var(--label); -webkit-font-smoothing: antialiased; -webkit-tap-highlight-color: transparent; }
+    button { touch-action: manipulation; }
+    button:active, .sheet-action:active, .list-row:active { transform: scale(0.97); }
+
+    /* ---- Day strip: weekday, big date number, ride count ---- */
+    #calendar {
+      gap: 6px; padding: 6px 10px; align-items: stretch;
+      background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      border-bottom: 0.5px solid var(--separator); scrollbar-width: none;
+    }
+    #calendar::-webkit-scrollbar { display: none; }
+    .day-column {
+      flex: 1 0 46px; min-width: 46px; max-width: 96px; padding: 3px 4px !important; border-radius: 12px;
+      background: transparent; transition: background 0.15s ease, color 0.15s ease; user-select: none;
+    }
+    .day-name { font-size: 0.66em; font-weight: 600; letter-spacing: 0.04em; color: var(--label-3); line-height: 1.2; }
+    .day-date { font-size: 1.22em; font-weight: 600; color: var(--label-3); line-height: 1.15; }
+    .ride-day { background: transparent; }
+    .ride-day .day-name { color: var(--label-2); }
+    .ride-day .day-date { color: var(--label); }
+    .day-count { font-size: 0.58em; font-weight: 600; color: var(--tint); line-height: 1.2; }
+    .day-column.selected { background: var(--tint); box-shadow: 0 2px 8px rgba(0, 122, 255, 0.35); }
+    .day-column.selected .day-name, .day-column.selected .day-date, .day-column.selected .day-count { color: #fff; }
+    .day-column:focus-visible { outline: 3px solid #ffbf47; outline-offset: 1px; }
+
+    /* ---- Floating glass controls at the bottom: menu, area picker, list ---- */
+    #menu-toggle-btn {
+      left: 12px; bottom: calc(14px + var(--safe-bottom)); width: 46px; height: 46px;
+      background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      box-shadow: var(--shadow); color: var(--tint);
+    }
+    #menu-toggle-btn:hover { background: rgba(255, 255, 255, 0.92); }
+    #menu-toggle-btn svg line { stroke: var(--tint); }
+    #area-bar {
+      left: 66px; right: 12px; bottom: calc(14px + var(--safe-bottom)); gap: 8px; padding: 0; overflow: visible; align-items: center;
+    }
+    #area-seg {
+      flex: 1 1 auto; min-width: 0; display: flex; gap: 2px; padding: 3px; overflow-x: auto; scrollbar-width: none;
+      background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      border-radius: 23px; box-shadow: var(--shadow);
+    }
+    #area-seg::-webkit-scrollbar { display: none; }
+    .area-chip {
+      flex: 1 0 auto; min-height: 40px; padding: 0 12px; border-radius: 20px; background: transparent; box-shadow: none;
+      font: 600 0.8em var(--font); color: var(--label); white-space: nowrap; transition: background 0.18s ease, color 0.18s ease;
+    }
+    .area-chip.active { background: var(--tint); color: #fff; box-shadow: 0 1px 4px rgba(0, 122, 255, 0.4); }
+    .area-chip .n { font-weight: 500; opacity: 0.6; margin-left: 5px; font-variant-numeric: tabular-nums; }
+    .area-chip .short { display: none; }
+    #list-fab {
+      flex: 0 0 auto; height: 46px; padding: 0 16px; border: none; border-radius: 23px; cursor: pointer;
+      display: flex; align-items: center; gap: 7px; font: 600 0.85em var(--font); color: var(--tint);
+      background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--shadow);
+    }
+    #list-fab:focus-visible { outline: 3px solid #ffbf47; outline-offset: 1px; }
+    @media (max-width: 520px) {
+      .area-chip { padding: 0 4px; font-size: 0.7em; flex: 1 1 auto; }
+      .area-chip .n { margin-left: 3px; }
+      #area-bar { gap: 6px; left: 64px; }
+      .area-chip .long { display: none; }
+      .area-chip .short { display: inline; }
+      #list-fab { width: 46px; padding: 0; justify-content: center; }
+      #list-fab .txt { display: none; }
+    }
+    @media (min-width: 700px) { #area-seg { flex: 0 1 560px; } }
+    .maplibregl-ctrl-bottom-right { bottom: calc(66px + var(--safe-bottom)); }
+    @media (pointer: coarse) { .maplibregl-ctrl-top-left .maplibregl-ctrl-group { display: none; } } /* pinch to zoom on touch screens */
+    .maplibregl-ctrl-group { border-radius: 12px !important; overflow: hidden; box-shadow: var(--shadow) !important; }
+
+    /* ---- Menu: an iOS-style popover list ---- */
+    #menu-panel {
+      left: 12px; bottom: calc(70px + var(--safe-bottom)); gap: 0; padding: 0; min-width: 200px; overflow: hidden;
+      background: rgba(255, 255, 255, 0.94); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      border-radius: 14px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.22), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+      transform-origin: bottom left; animation: pop-in 0.16s ease-out;
+    }
+    @keyframes pop-in { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
+    #menu-panel .overlay-btn {
+      display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 46px;
+      background: transparent !important; color: var(--label); box-shadow: none; border-radius: 0;
+      padding: 0 16px; font: 400 1em var(--font); text-align: left; border-bottom: 0.5px solid var(--separator);
+    }
+    #menu-panel .overlay-btn:last-child { border-bottom: none; }
+    #menu-panel .overlay-btn:hover { background: var(--fill) !important; }
+    #menu-panel .overlay-btn::after { content: "›"; color: var(--label-3); font-size: 1.3em; line-height: 1; }
+    #metric-btn::after { content: "" !important; width: 44px; height: 26px; border-radius: 13px; background: var(--fill-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 26'%3E%3Ccircle cx='13' cy='13' r='11' fill='white'/%3E%3C/svg%3E") no-repeat; transition: background-color 0.2s ease; flex: 0 0 44px; }
+    #metric-btn.active::after { background: #34c759 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 26'%3E%3Ccircle cx='31' cy='13' r='11' fill='white'/%3E%3C/svg%3E") no-repeat; }
+
+    /* ---- Weather card ---- */
+    #weather-widget {
+      background: var(--glass) !important; -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      border-radius: 14px !important; box-shadow: var(--shadow) !important; padding: 6px 10px !important; color: var(--label) !important;
+    }
+
+    /* ---- Ride card ---- */
+    #ride-sheet { background: #fff; border-radius: 22px 22px 0 0; box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.2); z-index: 1100; }
+    #sheet-handle { width: 36px; height: 5px; border-radius: 3px; background: var(--fill-2); margin: 8px auto 0; }
+    #sheet-body { padding: 14px 20px calc(20px + var(--safe-bottom)); }
+    #sheet-header { gap: 8px; margin-bottom: 2px; }
+    #sheet-color-bar { width: 12px; height: 12px; }
+    #sheet-club { font-size: 0.78em; font-weight: 600; letter-spacing: 0.03em; color: var(--label-2); }
+    #sheet-title { font-size: 1.36em; font-weight: 700; letter-spacing: -0.01em; color: var(--label); line-height: 1.2; margin: 0 0 12px; overflow-wrap: anywhere; }
+    #sheet-meta { gap: 6px; margin-bottom: 12px; }
+    .sheet-badge { background: var(--fill); color: var(--label); border: none; border-radius: 8px; padding: 5px 10px; font-size: 0.82em; font-weight: 500; }
+    #sheet-meta .sheet-badge:first-child { background: var(--tint-soft); color: var(--tint); font-weight: 600; }
+    .sheet-badge.women { background: rgba(175, 82, 222, 0.14); color: #8944ab; }
+    .sheet-badge.muted { background: transparent; color: var(--label-2); box-shadow: inset 0 0 0 1px var(--separator); }
+    .sheet-badge.pending { background: var(--fill); color: var(--label-3); }
+    .sheet-badge.boulder { background: rgba(52, 199, 89, 0.14); color: #248a3d; }
+    #club-badges .sheet-badge { border-radius: 16px; padding: 6px 12px; }
+    #club-badges a { text-decoration: none; }
+    #club-badges a .sheet-badge:not(.boulder):not(.pending) { background: var(--tint-soft); color: var(--tint); }
+    #sheet-where { font-size: 0.86em; color: var(--label-2); }
+    #sheet-desc { font-size: 0.86em; color: var(--label-2); line-height: 1.45; max-height: 4.35em; position: relative; }
+    #sheet-desc:not(.expanded)::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1.4em; background: linear-gradient(transparent, #fff); }
+    #sheet-profile-wrap { background: var(--fill); border-radius: 12px; padding: 8px 10px 6px; }
+    #sheet-profile-label { color: var(--label-2); margin-top: 2px; }
+    #sheet-actions { gap: 8px; margin-bottom: 10px; }
+    .sheet-action {
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 54px;
+      border: none; background: var(--tint-soft); color: var(--tint); border-radius: 14px; padding: 8px 4px;
+      font: 600 0.72em var(--font); transition: transform 0.1s ease, background 0.15s ease;
+    }
+    .sheet-action svg { width: 20px; height: 20px; }
+    .sheet-action:active { background: rgba(0, 122, 255, 0.2); }
+    #sheet-source-btn { background: var(--tint); border-radius: 14px; padding: 15px; font: 600 1.02em var(--font); }
+    #sheet-source-btn:active { background: #0062cc; }
+    #sheet-source-btn.no-url { background: var(--fill-2); color: var(--label-3); }
+    #sheet-weather-btn { background: var(--tint-soft); color: var(--tint); font: 600 0.85em var(--font); border-radius: 16px; }
+    #sheet-close { width: 30px; height: 30px; top: 12px; right: 14px; background: var(--fill); color: var(--label-2); font-size: 20px; line-height: 1; }
+    @media (pointer: fine) {
+      #ride-sheet { border-radius: 20px; box-shadow: 0 12px 48px rgba(0, 0, 0, 0.22), 0 0 0 0.5px rgba(0, 0, 0, 0.08); bottom: 76px; right: 16px; }
+      #sheet-header { padding-right: 36px; }
+      #sheet-weather-btn { border-radius: 14px; }
+    }
+    .ride-tooltip .maplibregl-popup-content { border-radius: 16px !important; box-shadow: var(--shadow) !important; }
+
+    /* ---- Day list ---- */
+    #list-panel { border-radius: 20px; box-shadow: 0 12px 48px rgba(0, 0, 0, 0.22), 0 0 0 0.5px rgba(0, 0, 0, 0.08); background: #f2f2f7; bottom: 76px; }
+    #list-head { background: transparent; border-bottom: none; padding: 16px 16px 10px; font-size: 1.12em; font-weight: 700; }
+    #list-close { background: var(--fill-2); color: var(--label-2); width: 30px; height: 30px; flex: 0 0 30px; line-height: 1; }
+    #list-body { margin: 0 12px 12px; border-radius: 14px; background: #fff; }
+    .list-row { align-items: flex-start; padding: 12px 14px; border-bottom: 0.5px solid var(--separator); background: transparent; position: relative; padding-right: 30px; }
+    .list-row:last-child { border-bottom: none; }
+    .list-row::after { content: "›"; position: absolute; right: 12px; top: 50%; transform: translateY(-55%); color: var(--label-3); font-size: 1.4em; }
+    .list-row:hover { background: var(--fill); }
+    .list-time { flex: 0 0 68px; color: var(--label); font-weight: 600; font-size: 0.8em; white-space: nowrap; font-variant-numeric: tabular-nums; padding-top: 1px; }
+    .list-club { font-size: 0.7em; font-weight: 600; letter-spacing: 0.03em; color: var(--label-2); }
+    .list-title { font-size: 0.98em; font-weight: 600; color: var(--label); margin: 1px 0; }
+    .list-sub { font-size: 0.78em; color: var(--label-2); }
+    .list-empty { color: var(--label-2); text-align: center; padding: 28px 16px; }
+    @media (max-width: 600px) {
+      #list-panel { border-radius: 22px 22px 0 0; max-height: 70%; padding-bottom: var(--safe-bottom); bottom: 0; z-index: 1600; }
+      #list-panel::before { content: ""; display: block; width: 36px; height: 5px; border-radius: 3px; background: var(--fill-2); margin: 8px auto 0; flex: 0 0 5px; }
+    }
+
+    /* ---- More / Races pages: large titles, grouped background ---- */
+    #info-page, #races-page { background: #f2f2f7; }
+    #info-content, #races-content { padding: 64px 20px 24px; }
+    #info-content h1, #races-content h1 { font-size: 2.1em; font-weight: 800; letter-spacing: -0.02em; color: var(--label); margin: 0 0 12px; }
+    #info-content h2, #races-content h2 { font-size: 1.25em; font-weight: 700; color: var(--label); margin: 26px 0 8px; }
+    #info-content p, #races-content p { line-height: 1.55; color: var(--label); font-size: 0.98em; }
+    #info-content a, #races-content a { color: var(--tint); text-decoration: none; }
+    #info-content hr, #races-content hr { border-top: 0.5px solid var(--separator); margin: 22px 0; }
+    #info-close, #races-close {
+      top: 12px; right: 12px; background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      color: var(--tint); font: 600 1em var(--font); border-radius: 18px; padding: 8px 16px; box-shadow: var(--shadow);
+    }
+    #info-close:hover, #races-close:hover { background: #fff; }
+    .race-entry { background: #fff; border-radius: 14px; padding: 14px 16px 6px; margin: 0 0 12px; }
+
+    /* ---- Toast and loading ---- */
+    #refresh-toast { border-radius: 22px !important; -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); font-family: var(--font); font-weight: 600; box-shadow: var(--shadow); }
+    #loading-label { font-family: var(--font); color: var(--label-2); font-weight: 500; }
+    #loading-bar-track { height: 4px; border-radius: 2px; background: var(--fill-2); }
+    #loading-bar-fill { background: var(--tint) !important; border-radius: 2px; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
   </style>
 </head>
 <body>
@@ -575,18 +779,18 @@
   <!-- "More" info button -->
   <!-- We call openInfoPage() function instead of "document.getElementById('info-page').classList.add('open');" here to refresh the club list if it is stale -->
   <button id="info-btn" class="overlay-btn"
-          onclick="openInfoPage(); closeMenuPanel()">More</button>
+          onclick="openInfoPage(); closeMenuPanel()">About &amp; clubs</button>
 
   <!-- Races & Events button -->
   <button id="races-btn" class="overlay-btn"
-          onclick="document.getElementById('races-page').classList.add('open'); loadRaces(); closeMenuPanel()">Races</button>
+          onclick="document.getElementById('races-page').classList.add('open'); loadRaces(); closeMenuPanel()">Races &amp; events</button>
 
   <!-- GPX/List: opens the GPX route list page -->
   <button id="gpx-btn" class="overlay-btn"
-          onclick="window.location.href = 'gpx/'">GPX/List</button> <!-- Opens the GPX route list page (relative path) -->
+          onclick="window.location.href = 'gpx/'">GPX downloads</button> <!-- Opens the GPX route list page (relative path) -->
 
           <!-- Metric/Imperial toggle (default: imperial) -->
-  <button id="metric-btn" class="overlay-btn">Metric</button>
+  <button id="metric-btn" class="overlay-btn" role="switch" aria-checked="false">Metric units</button>
 </div>
 
 <!-- Area filter chips and the List button -->
@@ -616,9 +820,18 @@
       <div id="sheet-profile-label"><span id="sheet-profile-min"></span><span id="sheet-profile-max"></span></div>
     </div>
     <div id="sheet-actions">
-      <button id="sheet-share" class="sheet-action" type="button">Share</button>
-      <a id="sheet-directions" class="sheet-action" target="_blank" rel="noopener noreferrer">Directions</a>
-      <button id="sheet-ics" class="sheet-action" type="button">Add to calendar</button>
+      <button id="sheet-share" class="sheet-action" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M8 7l4-4 4 4"/><path d="M5 11v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8"/></svg>
+        <span>Share</span>
+      </button>
+      <a id="sheet-directions" class="sheet-action" target="_blank" rel="noopener noreferrer">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11l18-8-8 18-2-8z"/></svg>
+        <span>Directions</span>
+      </a>
+      <button id="sheet-ics" class="sheet-action" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M12 13v5M9.5 15.5h5"/></svg>
+        <span>Calendar</span>
+      </button>
     </div>
     <a id="sheet-source-btn" target="_blank" rel="noopener noreferrer">View on...</a>
     <a id="sheet-weather-btn">Weather</a>
@@ -627,7 +840,7 @@
 
 <!-- Full-screen "More" info page -->
 <div id="info-page">
-  <button id="info-close" onclick="document.getElementById('info-page').classList.remove('open')">✕ Close</button>
+  <button id="info-close" onclick="document.getElementById('info-page').classList.remove('open')">Done</button>
 
   <div id="info-content">
 
@@ -704,7 +917,7 @@
       <strong>Checkered-flag pins</strong> mark upcoming races near Denver and Boulder. Tap the <strong>Races</strong> button to browse them, or click any checkered pin on the map to open the Races page with that event highlighted.
     </p>
     <p>
-Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort Collins or mountain rides only, and <strong>List</strong> to see the whole day as a list. A ride's area is decided by where it starts.
+Use the <strong>area picker</strong> at the bottom to show Denver, Boulder, Fort Collins or mountain rides only, and <strong>List</strong> to see the whole day as a list. A ride's area is decided by where it starts.
     </p>
     <p>
       <strong>Share</strong> on a ride card copies a link that opens this map straight on that ride. <strong>Directions</strong> opens the meeting point in Google Maps, and <strong>Add to calendar</strong> saves the ride to your phone or computer calendar.
@@ -763,7 +976,7 @@ Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort 
 
 <!-- Full-screen Races & Events page -->
 <div id="races-page">
-  <button id="races-close" onclick="document.getElementById('races-page').classList.remove('open'); document.querySelectorAll('.race-entry.highlighted').forEach(el => el.classList.remove('highlighted'))">✕ Close</button>
+  <button id="races-close" onclick="document.getElementById('races-page').classList.remove('open'); document.querySelectorAll('.race-entry.highlighted').forEach(el => el.classList.remove('highlighted'))">Done</button>
 
   <div id="races-content">
 
@@ -1141,6 +1354,9 @@ Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort 
 
   setProgress(10, 'Loading group rides…');     // Progress bar. Milestone 1: map object created
 
+  // Map credits stay behind the (i) button instead of opening as a bar across the map
+  map.once('load', () => document.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show'));
+
   // Zoom in/out buttons (compass hidden)
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
 
@@ -1516,6 +1732,7 @@ Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort 
   metricBtn.addEventListener('click', () => {
     metricUnits = !metricUnits;
     metricBtn.classList.toggle('active', metricUnits);
+    metricBtn.setAttribute('aria-checked', metricUnits);
     const selected = document.querySelector('.day-column.selected');
     if (selected?.dataset.date) updateWeather(selected.dataset.date);
     if (selectedRide) { renderSheetMeta(selectedRide); renderProfile(selectedRide); }
@@ -1541,35 +1758,44 @@ Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort 
       if (count) {
         if (!badge) { badge = document.createElement('div'); badge.className = 'day-count'; col.appendChild(badge); }
         badge.textContent = count + (count === 1 ? ' ride' : ' rides');
-        col.setAttribute('aria-label', `${date}, ${count} ride${count === 1 ? '' : 's'}`);
+        col.setAttribute('aria-label', `${col.title}, ${count} ride${count === 1 ? '' : 's'}`);
       } else {
         badge?.remove();
-        col.setAttribute('aria-label', `${date}, no rides`);
+        col.setAttribute('aria-label', `${col.title}, no rides`);
       }
     });
   }
 
-  // Builds the chips: one per area (with the selected day's ride count) plus the List button.
+  // Builds the bottom controls: a segmented area picker (with the selected day's ride counts) and the List button.
+  const REGION_SHORT = { foco: 'FoCo', mountains: 'Mtns' };
   function renderAreaBar() {
     const date = selectedDate();
     const dayRides = allRides.filter(r => r.date.split(' ')[0] === date);
     areaBar.innerHTML = '';
+    const seg = document.createElement('div');
+    seg.id = 'area-seg';
+    seg.setAttribute('role', 'group');
     for (const key of REGION_ORDER) {
       const n = key === 'all' ? dayRides.length : dayRides.filter(r => (r.region || 'denver') === key).length;
+      const label = REGION_VIEWS[key].label;
       const chip = document.createElement('button');
       chip.type = 'button';
       chip.className = 'area-chip' + (key === regionFilter ? ' active' : '');
       chip.setAttribute('aria-pressed', key === regionFilter);
-      chip.innerHTML = `${REGION_VIEWS[key].label}<span class="n">${n}</span>`;
+      chip.setAttribute('aria-label', `${label}, ${n} ride${n === 1 ? '' : 's'}`);
+      chip.innerHTML = `<span class="long">${label}</span><span class="short">${REGION_SHORT[key] || label}</span><span class="n">${n}</span>`;
       chip.addEventListener('click', () => setRegion(key));
-      areaBar.appendChild(chip);
+      seg.appendChild(chip);
     }
-    const listChip = document.createElement('button');
-    listChip.type = 'button';
-    listChip.className = 'area-chip';
-    listChip.textContent = '☰ List';
-    listChip.addEventListener('click', e => { e.stopPropagation(); toggleList(); });
-    areaBar.appendChild(listChip);
+    areaBar.appendChild(seg);
+    const listBtn = document.createElement('button');
+    listBtn.type = 'button';
+    listBtn.id = 'list-fab';
+    listBtn.setAttribute('aria-label', 'Show the day as a list');
+    listBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1" fill="currentColor"/><circle cx="4.5" cy="12" r="1" fill="currentColor"/><circle cx="4.5" cy="18" r="1" fill="currentColor"/></svg><span class="txt">List</span>`;
+    listBtn.addEventListener('click', e => { e.stopPropagation(); toggleList(); });
+    areaBar.appendChild(listBtn);
+    seg.querySelector('.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
   function setRegion(key, { reload = true } = {}) {
@@ -1788,11 +2014,8 @@ Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort 
     addBadge(formatTime12h(ride.date.split(" ")[1]));
 
     if (ride.dist_mi != null || ride.elev_gain_ft != null) {
-      const parts = [
-        ride.dist_mi       != null ? `Distance: ${formatDistance(ride.dist_mi)}`           : '',
-        ride.elev_gain_ft  != null ? `Elev Gain: ${formatElevation(ride.elev_gain_ft)}`    : '',
-      ].filter(Boolean);
-      addBadge(parts.join(' | '));
+      if (ride.dist_mi      != null) addBadge(formatDistance(ride.dist_mi));
+      if (ride.elev_gain_ft != null) addBadge('↑ ' + formatElevation(ride.elev_gain_ft));
     }
 
     if (ride.women_only) addBadge("Women only", "women");
@@ -2940,7 +3163,8 @@ Use the <strong>area chips</strong> at the bottom to show Denver, Boulder, Fort 
       // Date label (e.g. "(Apr 14)")
       const dateDiv = document.createElement("div");
       dateDiv.className = "day-date";
-      dateDiv.innerText = `(${date.toLocaleString('en-US', { month: 'short', day: 'numeric' })})`;
+      dateDiv.innerText = date.getDate();
+      col.title = date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
       col.append(nameDiv, dateDiv);
       col.setAttribute('role', 'button');

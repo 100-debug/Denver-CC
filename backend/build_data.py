@@ -226,6 +226,7 @@ UNPAVED_OSM = (
     "rock|woodchips|soil"
 )
 _overpass_down = False
+_overpass_failures = 0
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -250,10 +251,11 @@ def osm_surfaces(latlngs, snap_m=14.0):
         f'way["highway"="track"][!"surface"]({bbox});'
         f");out geom;"
     )
-    global _overpass_down
+    global _overpass_down, _overpass_failures
     if _overpass_down:
         return None
     data = None
+    time.sleep(6)  # the public Overpass servers throttle back-to-back queries
     for base in OVERPASS_URLS:
         try:
             data = http_get(base, data=urllib.parse.urlencode({"data": query}).encode(), timeout=45, retries=1)
@@ -261,10 +263,14 @@ def osm_surfaces(latlngs, snap_m=14.0):
         except Exception as e:  # noqa: BLE001 - any failure -> try the next mirror
             log(f"    overpass {base.split('/')[2]} failed: {e}")
     if data is None:
-        # Both mirrors failed: stop asking for the rest of this run so it cannot stall.
-        _overpass_down = True
-        log("    OpenStreetMap surface lookup unavailable - remaining routes are left untagged this run")
+        # Both mirrors failed. After two such failures in a row, stop asking for the rest of
+        # this run so it cannot stall; untagged routes are retried on the next run.
+        _overpass_failures += 1
+        if _overpass_failures >= 2:
+            _overpass_down = True
+            log("    OpenStreetMap surface lookup unavailable - remaining routes are left untagged this run")
         return None
+    _overpass_failures = 0
 
     lat0 = (min(lats) + max(lats)) / 2
     m_lat, m_lng = 111320.0, 111320.0 * math.cos(math.radians(lat0))

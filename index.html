@@ -1,0 +1,3333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!--
+    DEV NOTES
+    ─────────
+    Local server : py -m http.server 8000  →  http://localhost:8000
+    Mobile test  : F12 → toggle device toolbar
+    Hard refresh : Ctrl+Shift+R (Win/Linux) | Cmd+Shift+R (Mac)
+  -->
+
+  <!-- Character encoding -->
+  <meta charset="utf-8">
+
+  <!-- Page identity -->
+  <title>Denver Group Rides – All clubs, one map</title>
+  <meta name="description" content="Find group rides across metro Denver and Boulder on one interactive map, updated twice daily from Strava and Ride with GPS.">
+
+  <!-- Viewport -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+
+  <!-- Progressive Web App: : makes the site installable and feel like a native app -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="mobile-web-app-capable" content="yes"> <!-- Android -->
+  <meta name="apple-mobile-web-app-capable" content="yes"> <!-- iOS -->
+  <meta name="apple-mobile-web-app-title" content="Denver Rides">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#ffffff">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="assets/icons/icon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/favicon-32x32.png">
+
+  <!-- iOS home screen icon -->
+  <link rel="apple-touch-icon" sizes="180x180" href="assets/icons/apple-touch-icon.png">
+
+  <!-- Open Graph: controls how the site looks when shared on social media: Facebook, LinkedIn, Slack, etc. -->
+  <meta property="og:title"       content="Denver Group Rides">
+  <meta property="og:description" content="Group rides across metro Denver and Boulder, all in one place.">
+  <meta property="og:type"        content="website">
+
+  <!-- Start downloading the ride/race/weather data now, in parallel with MapLibre. Without this, the data
+       only starts downloading after the MapLibre script has loaded. This helps with connections that are not super fast -->
+  <script>
+    // Data is rebuilt every day by the backend workflow and published on the repository's 'data' branch.
+    // The site reads it from there, wherever the site itself is hosted. If that is unreachable, it falls
+    // back to the snapshot bundled with the site in data/.
+    const DATA_SOURCES = ['https://raw.githubusercontent.com/100-debug/Denver-CC/data/', 'data/'];
+    async function fetchData(file, options) {
+      let lastError = null;
+      for (const base of DATA_SOURCES) {
+        try {
+          const res = await fetch(base + file, options);
+          if (res.ok) return res;
+          lastError = new Error(base + file + ' -> HTTP ' + res.status);
+        } catch (e) { lastError = e; }
+      }
+      throw lastError;
+    }
+  </script>
+
+  <!-- MapLibre GL JS CSS (media="print" + onload="this.media='all'" loads it in the background, so the page shows up sooner) -->
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css" media="print" onload="this.media='all'"> <!-- Using a pinned version, so updates down the road do not break the site -->
+  <noscript><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"></noscript> <!-- Fallback when JavaScript is disabled -->
+
+  <style>
+    /* Base layout: full-screen, no scrollbars */
+    html, body {
+      margin: 0;
+      height: 100%;
+      width: 100%;
+      font-family: Arial;
+      overflow: hidden; /* prevents scrollbars */
+    }
+
+    /* Calendar */
+    #calendar {
+      display: flex;
+      gap: 10px;
+      padding: 10px;
+      overflow-x: auto;
+      height: 64px;
+      box-sizing: border-box;
+    }
+    .day-column {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-width: 60px;
+      cursor: pointer;
+      padding: 5px;
+      border-radius: 5px;
+    }
+    .day-name { font-weight: bold; }
+    .day-date { font-size: 0.85em; color: gray; }
+
+    /* Days that have rides get a gray background */
+    .ride-day { background-color: #e6e6e6; } /* gray background for days with rides */
+    .ride-day .day-date { color: #555; } /* darker gray for date text on ride days */
+
+    /* Selected day turns blue */
+    .selected { background-color: #007bff; color: white; }
+    .selected .day-date { color: white; }
+
+    /* Map fills the remaining screen height */
+    #map { height: calc(100% - 64px); } /* 100% minus calendar height */
+    /* Android Chrome: avoid a white blank gap at the bottom when showing/hiding the ride sheet */
+    @supports (height: 100dvh) {
+      html, body { height: 100dvh; }
+      #map { height: calc(100dvh - 64px); }
+    }
+
+    /* Shared button base: reused by info-btn and metric-btn */
+    .overlay-btn {
+      position: fixed;
+      left: 16px;
+      z-index: 1000;
+      color: white;
+      border: none;
+      border-radius: 20px;
+      padding: 8px 16px;
+      min-width: 72px;
+      font-size: 0.9em;
+      font-weight: bold;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      transition: background 0.2s;
+    }
+    #info-btn   { bottom: 89px; background: #007bff; }
+    #races-btn  { bottom: 49px; background: #007bff; }
+    #gpx-btn    { background: #007bff; }
+    #metric-btn { bottom: 15px;  background: #777; } /* gray background when not selected */
+    #info-btn:hover   { background: #0056b3; }
+    #races-btn:hover  { background: #0056b3; }
+    #gpx-btn:hover    { background: #0056b3; }
+
+    /* Day count badge on calendar days */
+    .day-column { padding: 2px 6px !important; }
+    .day-count { font-size: 0.62em; font-weight: bold; line-height: 1.2; color: #007bff; white-space: nowrap; }
+    .selected .day-count { color: #fff; }
+
+    /* Area filter chips + List button (bottom of the map, right of the menu button) */
+    #area-bar {
+      position: fixed; left: 72px; right: 48px; bottom: 17px; z-index: 900;
+      display: flex; gap: 6px; overflow-x: auto; padding: 3px 2px; scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+    }
+    #area-bar::-webkit-scrollbar { display: none; }
+    .area-chip {
+      flex: 0 0 auto; border: none; border-radius: 18px; padding: 8px 12px; min-height: 36px;
+      font: bold 0.82em Arial, sans-serif; background: #fff; color: #333; cursor: pointer;
+      box-shadow: 0 1px 5px rgba(0,0,0,0.3); -webkit-tap-highlight-color: transparent;
+    }
+    .area-chip.active { background: #007bff; color: #fff; }
+    .area-chip .n { font-weight: normal; opacity: 0.75; margin-left: 4px; }
+    .area-chip:focus-visible, .list-row:focus-visible, .sheet-action:focus-visible { outline: 3px solid #ffbf47; outline-offset: 1px; }
+    @media (pointer: coarse) {
+      #area-bar { transition: opacity 0.2s ease; }
+      body.sheet-open #area-bar { opacity: 0; pointer-events: none; }
+    }
+
+    /* Day list panel */
+    #list-panel {
+      display: none; position: fixed; z-index: 1500; background: #fff; overflow: hidden;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.3); font-family: Arial, sans-serif;
+      left: 16px; top: 150px; bottom: 76px; width: 350px; max-width: calc(100% - 32px); border-radius: 14px;
+      flex-direction: column;
+    }
+    #list-panel.open { display: flex; }
+    #list-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #eee; font-weight: bold; }
+    #list-close { border: none; background: #eee; border-radius: 50%; width: 32px; height: 32px; font-size: 1.1em; cursor: pointer; }
+    #list-body { overflow-y: auto; flex: 1; }
+    .list-row { display: flex; gap: 10px; width: 100%; text-align: left; border: none; background: #fff; padding: 10px 14px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font: inherit; color: #222; }
+    .list-row:hover { background: #f5f9ff; }
+    .list-dot { flex: 0 0 12px; width: 12px; height: 12px; border-radius: 50%; margin-top: 4px; }
+    .list-time { flex: 0 0 62px; font-weight: bold; font-size: 0.85em; color: #007bff; }
+    .list-main { flex: 1; min-width: 0; }
+    .list-club { font-weight: bold; font-size: 0.82em; text-transform: uppercase; }
+    .list-title { font-size: 0.9em; color: #555; overflow-wrap: anywhere; }
+    .list-sub { font-size: 0.75em; color: #888; margin-top: 2px; }
+    .list-empty { padding: 20px 14px; color: #777; font-size: 0.9em; }
+    @media (max-width: 600px) {
+      #list-panel { left: 0; right: 0; top: auto; bottom: 0; width: auto; max-width: none; max-height: 62%; border-radius: 16px 16px 0 0; }
+    }
+
+    /* Extra ride card content */
+    #sheet-where { font-size: 0.85em; color: #444; margin: 0 0 8px; overflow-wrap: anywhere; }
+    #sheet-desc { font-size: 0.82em; color: #666; margin: 0 0 10px; line-height: 1.4; max-height: 5.6em; overflow: hidden; overflow-wrap: anywhere; cursor: pointer; }
+    #sheet-desc.expanded { max-height: none; }
+    #sheet-profile-wrap { margin: 0 0 10px; }
+    #sheet-profile { display: block; width: 100%; height: 46px; }
+    #sheet-profile-label { display: flex; justify-content: space-between; font-size: 0.7em; color: #888; }
+    #sheet-actions { display: flex; gap: 8px; margin: 0 0 10px; }
+    .sheet-action {
+      flex: 1; text-align: center; border: 1px solid #cce0ff; background: #f0f6ff; color: #007bff; border-radius: 10px;
+      padding: 10px 4px; font: bold 0.8em Arial, sans-serif; cursor: pointer; text-decoration: none; box-sizing: border-box;
+    }
+    .sheet-action:active { background: #dbe9ff; }
+    .sheet-badge.muted { background: #f4f4f4; color: #666; border-color: #ddd; }
+    #sheet-body { max-height: 72vh; overflow-y: auto; }
+    #metric-btn.active { background: #007bff; }
+    #metric-btn:active { transform: scale(0.98); }
+
+    /* Hamburger menu toggle (bottom-left) */
+    #menu-toggle-btn {
+      position: fixed;
+      left: 16px;
+      bottom: 15px;             /* bottom space for hamburger button */
+      z-index: 1000;
+      width: 44px;
+      height: 44px;
+      border: none;
+      border-radius: 50%;       /* circular icon button */
+      background: #007bff;
+      color: white;
+      padding: 0;                /* remove default button padding so flex-centering below is exact */
+      display: flex;             /* perfectly centers the icon both horizontally and vertically */
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      transition: background 0.2s;
+    }
+    #menu-toggle-btn:hover { background: #0056b3; }
+
+    /* Collapsible panel: a translucent rectangle holding the 4 buttons, stacked above the hamburger */
+    #menu-panel {
+      position: fixed;
+      left: 16px;
+      bottom: 68px;              /* sits just above the hamburger button */
+      z-index: 1000;
+      display: none;             /* hidden by default; JS toggles the .open class */
+      flex-direction: column;
+      gap: 8px;
+      background: rgba(255, 255, 255, 0.45);  /* "transparency" - lower alpha = more see-through */
+      backdrop-filter: blur(4px);             /* frosted-glass effect behind it */
+      border-radius: 14px;
+      padding: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    }
+    #menu-panel.open { display: flex; }
+    #menu-panel .overlay-btn { position: static; }
+
+    /* Full-screen "More" page */
+    #info-page {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: white;
+      z-index: 2000;
+      overflow-y: auto;
+    }
+    #info-page.open { display: block; }
+
+    /* Full-screen "Races" page */
+    #races-page {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: white;
+      z-index: 2000;
+      overflow-y: auto;
+    }
+    #races-page.open { display: block; }
+
+    #info-content, #races-content {
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 60px 24px 0;
+    }
+
+    /* Close button: always visibe in the top-right corner */
+    #info-close, #races-close {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 2100;
+      background: #007bff;
+      color: white;
+      border: none;
+      border-radius: 20px;
+      padding: 7px 16px;
+      font-size: 0.9em;
+      font-weight: bold;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      transition: background 0.2s;
+    }
+    #info-close:hover, #races-close:hover { background: #0056b3; }
+    @media (min-width: 700px) {
+      #info-close, #races-close { right: calc(50% - 320px + 16px); }
+    }
+
+    /* Info page typography */
+    #info-content h1, #races-content h1 { font-size: 1.6em; color: #007bff; margin: 0 0 8px; }
+    #info-content h2, #races-content h2 { font-size: 1.15em; color: #222; margin: 28px 0 8px; }
+    #info-content p, #races-content p { margin: 0 0 12px; line-height: 1.7; color: #333; font-size: 0.95em; }
+    #info-content hr, #races-content hr {border: none; border-top: 1px solid #eee; margin: 24px 0; }
+
+    /* Shared ride card: bottom sheet on mobile (touch), floating card on desktop (mouse) */
+    #ride-sheet {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      z-index: 900;
+      background: white; border-radius: 18px 18px 0 0;
+      box-shadow: 0 -4px 24px rgba(0,0,0,0.18);
+      transform: translateY(100%);
+      transition: transform 0.32s cubic-bezier(0.4,0,0.2,1);
+      pointer-events: none;
+    }
+    #ride-sheet.open { transform: translateY(0); pointer-events: all; }
+    #sheet-handle { width: 40px; height: 4px; background: #ccc; border-radius: 2px; margin: 12px auto 0; }
+    #sheet-body { padding: 16px 20px 28px; font-family: Arial, sans-serif; }
+    #sheet-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    #ride-sheet.has-weather #sheet-header { padding-right: 90px; } /* reserve space only when the Weather button is shown */
+    #sheet-close { display: none; position: absolute; top: 4px; right: 12px; width: 24px; height: 24px; border: none; border-radius: 50%; background: #eee; color: #333; font-size: 20px; cursor: pointer; }
+    #sheet-color-bar { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0; background: #007bff; }
+    #sheet-club { font-size: 1.15em; font-weight: 700; text-transform: uppercase; color: #111; line-height: 1.3; margin: 0; }
+    #sheet-title { font-size: 1.0em; font-weight: 400; color: #888; margin: 0 0 12px; }
+    #sheet-meta { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+
+    /* Bubbles used in the bottom sheet, desktop tooltip, and clubs in the More section */
+    .sheet-badge { background: #f0f6ff; color: #007bff; border: 1px solid #cce0ff; border-radius: 20px; padding: 5px 14px; font-size: 0.88em; font-weight: 500; display: inline-block; line-height: 1; }
+    .sheet-badge.women { background: #f3f0ff; color: #6f42c1; border-color: #d0c4f7; }
+	  .sheet-badge.pending { background: #f4f4f4; color: #888; border-color: #ddd; }
+	  .sheet-badge.boulder { background: #f0fff4; color: #28a745; border-color: #b2dfdb; }
+    a:has(.sheet-badge) { text-decoration: none; } /* remove underline from badges */
+
+    /* "View on {source}" button */
+    #sheet-source-btn {
+      display: block; width: 100%; background: #fc4c02; color: white; border: none;
+      border-radius: 12px; padding: 14px; font-size: 1em; font-weight: 700;
+      font-family: Arial, sans-serif; cursor: pointer; text-align: center;
+      text-decoration: none; box-sizing: border-box;
+      transition: background 0.2s, transform 0.1s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #sheet-source-btn:active { background: #e04400; transform: scale(0.98); }
+    #sheet-source-btn.no-url { background: #ccc; cursor: default; }
+
+    /* "Weather" button: top-right of the ride card, opens the detailed weather page.
+       Hidden by default; openSheet() shows it only when detailed weather is available. */
+    #sheet-weather-btn {
+      position: absolute; top: 27px; right: 20px; /* vertically centered on the club-name row of the header */
+      display: none; background: #007bff; color: white; border: none;
+      border-radius: 20px; padding: 7px 14px; font-size: 0.85em; font-weight: 700;
+      font-family: Arial, sans-serif; cursor: pointer; text-decoration: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #sheet-weather-btn:active { background: #0056b3; }
+
+    /* Detailed weather opens in a full-screen frame above the map, so closing it
+       returns to the live map instead of reloading the site. */
+    #weather-frame {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      border: 0; background: #fff; z-index: 5000;
+    }
+
+    /* On touch devices: hide info button, races button, metric button, and map attribution behind sheet when open */
+    @media (pointer: coarse) {
+      #menu-toggle-btn { transition: background 0.2s, opacity 0.2s ease; }
+      #menu-toggle-btn.sheet-open { opacity: 0; pointer-events: none; }
+      .maplibregl-ctrl-attrib { transition: opacity 0.3s ease; } /* compact mode */
+      .maplibregl-ctrl-attrib.hidden { opacity: 0; pointer-events: none; }
+    }
+
+    @media (pointer: fine) {
+      #ride-sheet {
+        left: auto; right: 24px; bottom: 32px; width: 380px; max-width: calc(100% - 48px);
+        border-radius: 16px;
+        visibility: hidden; opacity: 0; transform: translateY(16px);
+        transition: transform 0.2s ease, opacity 0.2s ease, visibility 0.2s;
+      }
+      #ride-sheet.open { visibility: visible; opacity: 1; transform: translateY(0); }
+      #sheet-handle { display: none; }
+      #sheet-close { display: block; }
+      #ride-sheet.has-weather #sheet-header { padding-right: 0; }
+      #sheet-weather-btn { position: static; width: 100%; box-sizing: border-box; margin-top: 10px; padding: 14px; border-radius: 12px; font-size: 1em; text-align: center; }
+    }
+
+    /* ── Loading overlay ──────────────────────────────────────────────────────
+       Covers the full screen while the map style and ride data are being fetched.
+       Fades out once generateCalendar() has run */
+    #loading-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;            /* above everything, including the map */
+      background: white;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      transition: opacity 0.4s ease;
+    }
+    /* Adding .hidden triggers the fade-out; pointer-events:none lets map clicks through immediately */
+    #loading-overlay.hidden { opacity: 0; pointer-events: none; }
+
+    #loading-label {
+      font-size: 1em;
+      color: #555;
+      font-family: Arial, sans-serif;
+    }
+
+    /* Gray track that holds the blue fill bar */
+    #loading-bar-track {
+      width: 220px;
+      height: 6px;
+      background: #e0e0e0;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    /* Blue fill. Width is driven by setProgress() in JS */
+    #loading-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: #007bff;
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+
+    /* Translucent pill for background data refreshes when the user returns.
+       Floats over the map: clicks pass through. */
+    #refresh-toast {
+      position: fixed;
+      left: 50%;
+      top: 74px; /* 64px calendar height + 10px gap, same as the weather widget */
+      transform: translate(-50%, -8px);
+      z-index: 1500;
+      max-width: calc(100% - 32px);
+      box-sizing: border-box;
+      padding: 6px 16px;
+      border: 1px solid transparent;
+      border-radius: 20px;
+      backdrop-filter: blur(4px);
+      font-family: Arial, sans-serif;
+      font-size: 0.9em;
+      font-weight: 600;
+      line-height: 1.4;
+      text-align: center;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s;
+    }
+
+    #refresh-toast.visible {
+      opacity: 1;
+      visibility: visible;
+      transform: translate(-50%, 0);
+    }
+
+    /* State colors, set by showRefreshToast() */
+    #refresh-toast.checking { background: rgba(240, 246, 255, 0.92); color: #007bff; border-color: #cce0ff; }  /* Blue */
+    #refresh-toast.success  { background: rgba(240, 255, 244, 0.92); color: #28a745; border-color: #b2dfdb; }  /* Green */
+    #refresh-toast.error    { background: rgba(255, 240, 241, 0.92); color: #dc3545; border-color: #f5c2c7; }  /* Red */
+
+    /* Remove MapLibre GL JS focus outline on routes */
+    .maplibregl-canvas:focus { outline: none; }
+
+    /* MapLibre popup: transparent wrapper so only our inner HTML is visible (no rectangle) */
+    /* z-index must exceed the event banner (500), if there is any, so the tooltip appears on top of it */
+    .maplibregl-popup {
+      z-index: 600;
+    }
+    .maplibregl-popup-content {
+      background: transparent !important;
+      box-shadow: none !important;
+      border: none !important;
+      padding: 0 !important;
+    }
+
+    /* Highlighted race card (when opened via map pin click) */
+    .race-entry.highlighted {
+      background: #f0f0f0;
+      border-radius: 8px;
+      padding: 5px;
+      margin: -8px;
+    }
+
+    /* Desktop hover tooltip card */
+    .ride-tooltip {
+      pointer-events: none;
+      border-radius: 12px; /* rounded corners */
+      padding: 16px 20px;
+      box-shadow: 0 -4px 24px rgba(0,0,0,0.18);
+      border: none;
+      background: white;
+      min-width: 200px;
+    }
+
+    /* Make attribution smaller and less intrusive */
+    .maplibregl-ctrl-attrib {
+      font-size: 9px;
+      opacity: 0.9;
+      display: flex;
+      align-items: center;   /* vertical centering */
+      line-height: normal;
+    }
+
+    /* Slightly larger attribution text on desktop */
+    @media (pointer: fine) {
+      .maplibregl-ctrl-attrib { font-size: 11px; }
+    }
+
+    /* Remove the blue circle that appears on the attribution "i" button after clicking */
+    .maplibregl-ctrl-attrib-button {
+      background-color: transparent !important;
+      box-shadow: none !important;
+      outline: none !important;
+      border: none !important;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .maplibregl-ctrl-attrib-button:focus,
+    .maplibregl-ctrl-attrib-button:active,
+    .maplibregl-ctrl-attrib-button:focus-visible {
+      background-color: transparent !important;
+      box-shadow: none !important;
+      outline: none !important;
+      border: none !important;
+    }
+
+
+    /* ==========================================================================
+       iOS-style theme
+       Layered on top of the rules above: system font, iOS colors, frosted-glass
+       surfaces, large tap targets, safe-area insets. Colors and radii live in the
+       variables below.
+       ========================================================================== */
+    :root {
+      --tint: #007aff;            /* iOS system blue */
+      --tint-soft: rgba(0, 122, 255, 0.12);
+      --label: #1c1c1e;
+      --label-2: rgba(60, 60, 67, 0.72);
+      --label-3: rgba(60, 60, 67, 0.5);
+      --fill: rgba(118, 118, 128, 0.12);
+      --fill-2: rgba(118, 118, 128, 0.2);
+      --separator: rgba(60, 60, 67, 0.16);
+      --glass: rgba(255, 255, 255, 0.88);
+      --glass-blur: saturate(180%) blur(20px);
+      --shadow: 0 4px 24px rgba(0, 0, 0, 0.14), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Segoe UI", Roboto, Arial, sans-serif;
+    }
+    html, body, button, input, #sheet-body, #list-panel, #weather-widget, .ride-tooltip { font-family: var(--font) !important; }
+    body { color: var(--label); -webkit-font-smoothing: antialiased; -webkit-tap-highlight-color: transparent; }
+    button { touch-action: manipulation; }
+    button:active, .sheet-action:active, .list-row:active { transform: scale(0.97); }
+
+    /* ---- Day strip: weekday, big date number, ride count ---- */
+    #calendar {
+      gap: 6px; padding: 6px 10px; align-items: stretch;
+      background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      border-bottom: 0.5px solid var(--separator); scrollbar-width: none;
+    }
+    #calendar::-webkit-scrollbar { display: none; }
+    .day-column {
+      flex: 1 0 46px; min-width: 46px; max-width: 96px; padding: 3px 4px !important; border-radius: 12px;
+      background: transparent; transition: background 0.15s ease, color 0.15s ease; user-select: none;
+    }
+    .day-name { font-size: 0.66em; font-weight: 600; letter-spacing: 0.04em; color: var(--label-3); line-height: 1.2; }
+    .day-date { font-size: 1.22em; font-weight: 600; color: var(--label-3); line-height: 1.15; }
+    .ride-day { background: transparent; }
+    .ride-day .day-name { color: var(--label-2); }
+    .ride-day .day-date { color: var(--label); }
+    .day-count { font-size: 0.58em; font-weight: 600; color: var(--tint); line-height: 1.2; }
+    .day-column.selected { background: var(--tint); box-shadow: 0 2px 8px rgba(0, 122, 255, 0.35); }
+    .day-column.selected .day-name, .day-column.selected .day-date, .day-column.selected .day-count { color: #fff; }
+    .day-column:focus-visible { outline: 3px solid #ffbf47; outline-offset: 1px; }
+
+    /* ---- Floating glass controls at the bottom: menu, area picker, list ---- */
+    #menu-toggle-btn {
+      left: 12px; bottom: calc(14px + var(--safe-bottom)); width: 46px; height: 46px;
+      background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      box-shadow: var(--shadow); color: var(--tint);
+    }
+    #menu-toggle-btn:hover { background: rgba(255, 255, 255, 0.92); }
+    #menu-toggle-btn svg line { stroke: var(--tint); }
+    #area-bar {
+      left: 66px; right: 12px; bottom: calc(14px + var(--safe-bottom)); gap: 8px; padding: 0; overflow: visible; align-items: center;
+    }
+    #area-seg {
+      flex: 1 1 auto; min-width: 0; display: flex; gap: 2px; padding: 3px; overflow-x: auto; scrollbar-width: none;
+      background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      border-radius: 23px; box-shadow: var(--shadow);
+    }
+    #area-seg::-webkit-scrollbar { display: none; }
+    .area-chip {
+      flex: 1 0 auto; min-height: 40px; padding: 0 12px; border-radius: 20px; background: transparent; box-shadow: none;
+      font: 600 0.8em var(--font); color: var(--label); white-space: nowrap; transition: background 0.18s ease, color 0.18s ease;
+    }
+    .area-chip.active { background: var(--tint); color: #fff; box-shadow: 0 1px 4px rgba(0, 122, 255, 0.4); }
+    .area-chip .n { font-weight: 500; opacity: 0.6; margin-left: 5px; font-variant-numeric: tabular-nums; }
+    .area-chip .short { display: none; }
+    #list-fab {
+      flex: 0 0 auto; height: 46px; padding: 0 16px; border: none; border-radius: 23px; cursor: pointer;
+      display: flex; align-items: center; gap: 7px; font: 600 0.85em var(--font); color: var(--tint);
+      background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--shadow);
+    }
+    #list-fab:focus-visible { outline: 3px solid #ffbf47; outline-offset: 1px; }
+    @media (max-width: 520px) {
+      .area-chip { padding: 0 4px; font-size: 0.7em; flex: 1 1 auto; }
+      .area-chip .n { margin-left: 3px; }
+      #area-bar { gap: 6px; left: 64px; }
+      .area-chip .long { display: none; }
+      .area-chip .short { display: inline; }
+      #list-fab { width: 46px; padding: 0; justify-content: center; }
+      #list-fab .txt { display: none; }
+    }
+    @media (min-width: 700px) { #area-seg { flex: 0 1 560px; } }
+    .maplibregl-ctrl-bottom-right { bottom: calc(66px + var(--safe-bottom)); }
+    @media (pointer: coarse) { .maplibregl-ctrl-top-left .maplibregl-ctrl-group { display: none; } } /* pinch to zoom on touch screens */
+    .maplibregl-ctrl-group { border-radius: 12px !important; overflow: hidden; box-shadow: var(--shadow) !important; }
+
+    /* ---- Menu: an iOS-style popover list ---- */
+    #menu-panel {
+      left: 12px; bottom: calc(70px + var(--safe-bottom)); gap: 0; padding: 0; min-width: 200px; overflow: hidden;
+      background: rgba(255, 255, 255, 0.94); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      border-radius: 14px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.22), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+      transform-origin: bottom left; animation: pop-in 0.16s ease-out;
+    }
+    @keyframes pop-in { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
+    #menu-panel .overlay-btn {
+      display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 46px;
+      background: transparent !important; color: var(--label); box-shadow: none; border-radius: 0;
+      padding: 0 16px; font: 400 1em var(--font); text-align: left; border-bottom: 0.5px solid var(--separator);
+    }
+    #menu-panel .overlay-btn:last-child { border-bottom: none; }
+    #menu-panel .overlay-btn:hover { background: var(--fill) !important; }
+    #menu-panel .overlay-btn::after { content: "›"; color: var(--label-3); font-size: 1.3em; line-height: 1; }
+    #metric-btn::after { content: "" !important; width: 44px; height: 26px; border-radius: 13px; background: var(--fill-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 26'%3E%3Ccircle cx='13' cy='13' r='11' fill='white'/%3E%3C/svg%3E") no-repeat; transition: background-color 0.2s ease; flex: 0 0 44px; }
+    #metric-btn.active::after { background: #34c759 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 26'%3E%3Ccircle cx='31' cy='13' r='11' fill='white'/%3E%3C/svg%3E") no-repeat; }
+
+    /* ---- Weather card ---- */
+    #weather-widget {
+      background: var(--glass) !important; -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      border-radius: 14px !important; box-shadow: var(--shadow) !important; padding: 6px 10px !important; color: var(--label) !important;
+    }
+
+    /* ---- Ride card ---- */
+    #ride-sheet { background: #fff; border-radius: 22px 22px 0 0; box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.2); z-index: 1100; }
+    #sheet-handle { width: 36px; height: 5px; border-radius: 3px; background: var(--fill-2); margin: 8px auto 0; }
+    #sheet-body { padding: 14px 20px calc(20px + var(--safe-bottom)); }
+    #sheet-header { gap: 8px; margin-bottom: 2px; }
+    #sheet-color-bar { width: 12px; height: 12px; }
+    #sheet-club { font-size: 0.78em; font-weight: 600; letter-spacing: 0.03em; color: var(--label-2); }
+    #sheet-title { font-size: 1.36em; font-weight: 700; letter-spacing: -0.01em; color: var(--label); line-height: 1.2; margin: 0 0 12px; overflow-wrap: anywhere; }
+    #sheet-meta { gap: 6px; margin-bottom: 12px; }
+    .sheet-badge { background: var(--fill); color: var(--label); border: none; border-radius: 8px; padding: 5px 10px; font-size: 0.82em; font-weight: 500; }
+    #sheet-meta .sheet-badge:first-child { background: var(--tint-soft); color: var(--tint); font-weight: 600; }
+    .sheet-badge.women { background: rgba(175, 82, 222, 0.14); color: #8944ab; }
+    .sheet-badge.muted { background: transparent; color: var(--label-2); box-shadow: inset 0 0 0 1px var(--separator); }
+    .sheet-badge.pending { background: var(--fill); color: var(--label-3); }
+    .sheet-badge.boulder { background: rgba(52, 199, 89, 0.14); color: #248a3d; }
+    #club-badges .sheet-badge { border-radius: 16px; padding: 6px 12px; }
+    #club-badges a { text-decoration: none; }
+    #club-badges a .sheet-badge:not(.boulder):not(.pending) { background: var(--tint-soft); color: var(--tint); }
+    #sheet-where { font-size: 0.86em; color: var(--label-2); }
+    #sheet-desc { font-size: 0.86em; color: var(--label-2); line-height: 1.45; max-height: 4.35em; position: relative; }
+    #sheet-desc:not(.expanded)::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1.4em; background: linear-gradient(transparent, #fff); }
+    #sheet-profile-wrap { background: var(--fill); border-radius: 12px; padding: 8px 10px 6px; }
+    #sheet-profile-label { color: var(--label-2); margin-top: 2px; }
+    #sheet-actions { gap: 8px; margin-bottom: 10px; }
+    .sheet-action {
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 54px;
+      border: none; background: var(--tint-soft); color: var(--tint); border-radius: 14px; padding: 8px 4px;
+      font: 600 0.72em var(--font); transition: transform 0.1s ease, background 0.15s ease;
+    }
+    .sheet-action svg { width: 20px; height: 20px; }
+    .sheet-action:active { background: rgba(0, 122, 255, 0.2); }
+    #sheet-source-btn { background: var(--tint); border-radius: 14px; padding: 15px; font: 600 1.02em var(--font); }
+    #sheet-source-btn:active { background: #0062cc; }
+    #sheet-source-btn.no-url { background: var(--fill-2); color: var(--label-3); }
+    #sheet-weather-btn { background: var(--tint-soft); color: var(--tint); font: 600 0.85em var(--font); border-radius: 16px; }
+    #sheet-close { width: 30px; height: 30px; top: 12px; right: 14px; background: var(--fill); color: var(--label-2); font-size: 20px; line-height: 1; }
+    @media (pointer: fine) {
+      #ride-sheet { border-radius: 20px; box-shadow: 0 12px 48px rgba(0, 0, 0, 0.22), 0 0 0 0.5px rgba(0, 0, 0, 0.08); bottom: 76px; right: 16px; }
+      #sheet-header { padding-right: 36px; }
+      #sheet-weather-btn { border-radius: 14px; }
+    }
+    .ride-tooltip .maplibregl-popup-content { border-radius: 16px !important; box-shadow: var(--shadow) !important; }
+
+    /* ---- Day list ---- */
+    #list-panel { border-radius: 20px; box-shadow: 0 12px 48px rgba(0, 0, 0, 0.22), 0 0 0 0.5px rgba(0, 0, 0, 0.08); background: #f2f2f7; bottom: 76px; }
+    #list-head { background: transparent; border-bottom: none; padding: 16px 16px 10px; font-size: 1.12em; font-weight: 700; }
+    #list-close { background: var(--fill-2); color: var(--label-2); width: 30px; height: 30px; flex: 0 0 30px; line-height: 1; }
+    #list-body { margin: 0 12px 12px; border-radius: 14px; background: #fff; }
+    .list-row { align-items: flex-start; padding: 12px 14px; border-bottom: 0.5px solid var(--separator); background: transparent; position: relative; padding-right: 30px; }
+    .list-row:last-child { border-bottom: none; }
+    .list-row::after { content: "›"; position: absolute; right: 12px; top: 50%; transform: translateY(-55%); color: var(--label-3); font-size: 1.4em; }
+    .list-row:hover { background: var(--fill); }
+    .list-time { flex: 0 0 68px; color: var(--label); font-weight: 600; font-size: 0.8em; white-space: nowrap; font-variant-numeric: tabular-nums; padding-top: 1px; }
+    .list-club { font-size: 0.7em; font-weight: 600; letter-spacing: 0.03em; color: var(--label-2); }
+    .list-title { font-size: 0.98em; font-weight: 600; color: var(--label); margin: 1px 0; }
+    .list-sub { font-size: 0.78em; color: var(--label-2); }
+    .list-empty { color: var(--label-2); text-align: center; padding: 28px 16px; }
+    @media (max-width: 600px) {
+      #list-panel { border-radius: 22px 22px 0 0; max-height: 70%; padding-bottom: var(--safe-bottom); bottom: 0; z-index: 1600; }
+      #list-panel::before { content: ""; display: block; width: 36px; height: 5px; border-radius: 3px; background: var(--fill-2); margin: 8px auto 0; flex: 0 0 5px; }
+    }
+
+    /* ---- More / Races pages: large titles, grouped background ---- */
+    #info-page, #races-page { background: #f2f2f7; }
+    #info-content, #races-content { padding: 64px 20px 24px; }
+    #info-content h1, #races-content h1 { font-size: 2.1em; font-weight: 800; letter-spacing: -0.02em; color: var(--label); margin: 0 0 12px; }
+    #info-content h2, #races-content h2 { font-size: 1.25em; font-weight: 700; color: var(--label); margin: 26px 0 8px; }
+    #info-content p, #races-content p { line-height: 1.55; color: var(--label); font-size: 0.98em; }
+    #info-content a, #races-content a { color: var(--tint); text-decoration: none; }
+    #info-content hr, #races-content hr { border-top: 0.5px solid var(--separator); margin: 22px 0; }
+    #info-close, #races-close {
+      top: 12px; right: 12px; background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+      color: var(--tint); font: 600 1em var(--font); border-radius: 18px; padding: 8px 16px; box-shadow: var(--shadow);
+    }
+    #info-close:hover, #races-close:hover { background: #fff; }
+    .race-entry { background: #fff; border-radius: 14px; padding: 14px 16px 6px; margin: 0 0 12px; }
+
+    /* ---- Toast and loading ---- */
+    #refresh-toast { border-radius: 22px !important; -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); font-family: var(--font); font-weight: 600; box-shadow: var(--shadow); }
+    #loading-label { font-family: var(--font); color: var(--label-2); font-weight: 500; }
+    #loading-bar-track { height: 4px; border-radius: 2px; background: var(--fill-2); }
+    #loading-bar-fill { background: var(--tint) !important; border-radius: 2px; }
+
+    /* ---- Add to calendar chooser and sign-up button ---- */
+    #sheet-cal-options { margin: 0 0 10px; border-radius: 14px; overflow: hidden; background: var(--fill); }
+    #sheet-cal-options[hidden], #sheet-signup-btn[hidden] { display: none; }
+    .cal-option {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 46px; box-sizing: border-box;
+      padding: 0 14px; border: none; border-bottom: 0.5px solid var(--separator); background: transparent; cursor: pointer;
+      font: 500 0.92em var(--font); color: var(--tint); text-decoration: none; text-align: left;
+    }
+    .cal-option:last-child { border-bottom: none; }
+    .cal-option span { font-size: 0.82em; font-weight: 400; color: var(--label-2); }
+    .cal-option:focus-visible, #sheet-signup-btn:focus-visible, #sheet-source-btn:focus-visible { outline: 3px solid #ffbf47; outline-offset: 1px; }
+    #sheet-signup-btn {
+      display: block; box-sizing: border-box; width: 100%; margin: 0 0 8px; padding: 14px; border-radius: 14px; text-align: center;
+      background: #34c759; color: #fff; font: 600 1.02em var(--font); text-decoration: none;
+    }
+    #sheet-signup-btn:active { background: #2aa74b; transform: scale(0.97); }
+    .race-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }
+    .race-actions a, .race-actions button {
+      border: none; cursor: pointer; text-decoration: none; border-radius: 10px; padding: 8px 12px;
+      font: 600 0.85em var(--font); background: var(--tint-soft); color: var(--tint);
+    }
+    .race-actions a.primary { background: var(--tint); color: #fff !important; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Loading overlay: shown until map + data are ready, then fades out -->
+<div id="loading-overlay">
+  <div id="loading-label">Loading group rides…</div>
+  <div id="loading-bar-track">
+    <div id="loading-bar-fill"></div>
+  </div>
+</div>
+
+<!-- Day-picker calendar strip -->
+<div id="calendar"></div>
+
+<!-- Event banner for special events (floats over the map, centered) -->
+ <!-- When no active banner exists in assets/banners/banner.json, this remains hidden -->
+<div id="event-banner" style="display:none; position:absolute; top:71px; left:0; right:0; z-index:500; text-align:center; pointer-events:none;">
+  <a id="event-banner-link" href="#" target="_blank" rel="noopener noreferrer" style="pointer-events:all;">
+    <img id="event-banner-img" src="" alt="Event" style="display:inline-block; border-radius:6px;" />
+  </a>
+</div>
+
+<!-- Full-screen map -->
+<div id="map"></div>
+
+<!-- Temporary notification for background data refreshes when the user returns (separate from #map so it never affects the map) -->
+<div id="refresh-toast" role="status" aria-live="polite"></div>
+
+<!-- Weather widget (top-right gray box) -->
+<div id="weather-widget" style="
+  display:none;
+  position:absolute; top:74px; right:10px; z-index:500; /* 74px = 64px calendar height + 10px gap */
+  background:#fff; color:#333; padding:4px 8px; border-radius:12px;
+  box-shadow:0 2px 8px rgba(0,0,0,0.25);
+  font-family:Arial; font-size:0.9em; line-height:1.4; text-align:center;">
+</div>
+
+<!-- Hamburger menu toggle (bottom-left) -->
+<!-- <button id="menu-toggle-btn" onclick="toggleMenuPanel(event)">☰</button> This has issues displaying the 3 lines in the middle of the circle for iOS Safari -->
+<button id="menu-toggle-btn" onclick="toggleMenuPanel(event)" aria-label="Menu">
+  <svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+    <line x1="2" y1="5"  x2="18" y2="5"  stroke="white" stroke-width="2" stroke-linecap="round"/>
+    <line x1="2" y1="10" x2="18" y2="10" stroke="white" stroke-width="2" stroke-linecap="round"/>
+    <line x1="2" y1="15" x2="18" y2="15" stroke="white" stroke-width="2" stroke-linecap="round"/>
+  </svg>
+</button>
+
+<!-- Collapsible panel holding More / Races / GPX/List / Metric (hidden until hamburger is clicked) -->
+<div id="menu-panel">
+  <!-- "More" info button -->
+  <!-- We call openInfoPage() function instead of "document.getElementById('info-page').classList.add('open');" here to refresh the club list if it is stale -->
+  <button id="info-btn" class="overlay-btn"
+          onclick="openInfoPage(); closeMenuPanel()">About &amp; clubs</button>
+
+  <!-- Races & Events button -->
+  <button id="races-btn" class="overlay-btn"
+          onclick="document.getElementById('races-page').classList.add('open'); loadRaces(); closeMenuPanel()">Races &amp; events</button>
+
+  <!-- GPX/List: opens the GPX route list page -->
+  <button id="gpx-btn" class="overlay-btn"
+          onclick="window.location.href = 'gpx/'">GPX downloads</button> <!-- Opens the GPX route list page (relative path) -->
+
+          <!-- Metric/Imperial toggle (default: imperial) -->
+  <button id="metric-btn" class="overlay-btn" role="switch" aria-checked="false">Metric units</button>
+</div>
+
+<!-- Area filter chips and the List button -->
+<div id="area-bar" role="group" aria-label="Filter rides by area"></div>
+
+<!-- List of the selected day's rides -->
+<div id="list-panel" role="dialog" aria-label="Rides on the selected day">
+  <div id="list-head"><span id="list-title">Rides</span><button id="list-close" type="button" aria-label="Close list">&times;</button></div>
+  <div id="list-body"></div>
+</div>
+
+<!-- Shared ride details: opens on route click or tap -->
+<div id="ride-sheet" role="region" aria-label="Selected ride" inert>
+  <div id="sheet-handle"></div>
+  <button id="sheet-close" type="button" aria-label="Close ride details">&times;</button>
+  <div id="sheet-body">
+    <div id="sheet-header">
+      <div id="sheet-color-bar"></div>
+      <div id="sheet-club"></div>
+    </div>
+    <div id="sheet-title"></div>
+    <div id="sheet-meta"></div>
+    <div id="sheet-where"></div>
+    <div id="sheet-desc" title="Show more"></div>
+    <div id="sheet-profile-wrap" hidden>
+      <svg id="sheet-profile" viewBox="0 0 300 46" preserveAspectRatio="none" role="img" aria-label="Elevation profile"></svg>
+      <div id="sheet-profile-label"><span id="sheet-profile-min"></span><span id="sheet-profile-max"></span></div>
+    </div>
+    <div id="sheet-actions">
+      <button id="sheet-share" class="sheet-action" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M8 7l4-4 4 4"/><path d="M5 11v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8"/></svg>
+        <span>Share</span>
+      </button>
+      <a id="sheet-directions" class="sheet-action" target="_blank" rel="noopener noreferrer">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11l18-8-8 18-2-8z"/></svg>
+        <span>Directions</span>
+      </a>
+      <button id="sheet-ics" class="sheet-action" type="button" aria-expanded="false" aria-controls="sheet-cal-options">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M12 13v5M9.5 15.5h5"/></svg>
+        <span>Add to calendar</span>
+      </button>
+    </div>
+    <div id="sheet-cal-options" hidden>
+      <button id="sheet-cal-ics" class="cal-option" type="button">Apple Calendar or Outlook<span>Downloads a calendar file</span></button>
+      <a id="sheet-cal-google" class="cal-option" target="_blank" rel="noopener noreferrer">Google Calendar<span>Opens in a new tab</span></a>
+    </div>
+    <a id="sheet-signup-btn" target="_blank" rel="noopener noreferrer" hidden></a>
+    <a id="sheet-source-btn" target="_blank" rel="noopener noreferrer">View on...</a>
+    <a id="sheet-weather-btn">Weather</a>
+  </div>
+</div>
+
+<!-- Full-screen "More" info page -->
+<div id="info-page">
+  <button id="info-close" onclick="document.getElementById('info-page').classList.remove('open')">Done</button>
+
+  <div id="info-content">
+
+    <h1>Denver Group Rides</h1>
+    <p>
+      Every group ride you're looking for, all in one place! This site pulls upcoming rides from cycling clubs and shops across metro Denver, Boulder, Fort Collins and Colorado's mountain towns, and displays them on an interactive map. Boulder rides come from <a href="https://boulderrides.cc" target="_blank" rel="noopener noreferrer">boulderrides.cc</a>.
+    </p>
+    <p style="font-size: 0.9em; color: #888;">
+      Free, open source, and modeled on Boulder Group Rides by Roger Bergua, whose MIT-licensed frontend this site is built from. If you find this useful, please support the original project.
+      <span id="data-status"></span>
+    </p>
+
+    <hr>
+
+    <h2>Why this exists</h2>
+    <p>
+      Boulder has had one map for all of its group rides since March 2026. Denver did not. Finding out what's happening, when, and where meant checking a dozen club pages. This project puts it all in one place.
+    </p>
+
+    <p>
+      A backend process pulls the latest events several times a day from Ride with GPS club pages, Meetup group calendars, the Bicycle Colorado calendar and (once connected) Strava clubs. Boulder rides are merged in from the boulderrides.cc public data feed. It requires zero effort from the clubs themselves.
+    </p>
+    <p>
+      Every ride is checked before it is shown: the distance is re-measured from the route itself, the start point must be in Colorado, and a ride posted on two platforms is listed once. Phone numbers and email addresses are removed from descriptions.
+    </p>
+
+    <hr>
+
+    <h2>Clubs on the map</h2>
+    <p>
+      The following clubs are checked on every update. To suggest a new one, <a href="https://github.com/100-debug/Denver-CC/issues" target="_blank" rel="noopener noreferrer">open an issue on GitHub</a>.
+    </p>
+
+    <!-- Club badge list: filled in from data/clubs.json (written by the backend from backend/config.json) -->
+    <!-- Blue = Denver-metro club; Green = Boulder club (via boulderrides.cc); Gray = waiting on Strava API access -->
+    <div id="club-badges" style="display:flex; flex-wrap:wrap; gap:8px; margin:14px 0 16px;"></div>
+
+    <p style="font-size:0.8em; color:#666;">
+      <span style="color:#007bff; font-weight:600;">Blue-labeled</span> sources are pulled directly on every update. <span style="color:#28a745; font-weight:600;">Green-labeled</span> clubs are Boulder clubs, carried over as published by boulderrides.cc. <span style="color:#888; font-weight:600;">Gray-labeled</span> clubs post their rides on Strava and appear on the map once Strava API access is connected. Rides anywhere in Colorado are shown; the area chips group them by where they start.
+    </p>
+
+    <hr>
+
+    <h2>Weather forecast</h2>
+    <p>
+      Forecasts are provided by the National Weather Service API for downtown Denver and updated with every data refresh.
+    </p>
+
+    <p>
+      Displayed forecast times:
+    </p>
+    <p>
+      <strong>Summer</strong> (Daylight Saving Time): 9 AM &amp; 4 PM<br>
+      <strong>Winter</strong> (Standard Time): 10 AM &amp; 2 PM
+    </p>
+    <p>
+      Detailed weather along the route is available for some rides when the average speed is known (for Denver rides, when the organizer states a single pace in the event description).
+      You can also explore weather along your own ride at <a href="https://rideaheadweather.com" target="_blank" rel="noopener noreferrer">rideaheadweather.com</a>.
+    </p>
+
+    <hr>
+
+    <h2>How to use it</h2>
+    <p>
+      <strong>Pick a day</strong> on the calendar. Highlighted days have rides or races/events, and the first available one loads automatically.
+    </p>
+    <p>
+      <strong>Click or tap</strong> a route or its pin to see details and available weather. On desktop, <strong>hover</strong> for a quick preview. Close the card or select another ride to keep exploring.
+    </p>
+    <p>
+      <strong>Solid lines</strong> are paved, <strong>dashed lines</strong> are unpaved (e.g., gravel). Each route has a pin that marks its start.
+    </p>
+        <p>
+      <strong>Checkered-flag pins</strong> mark upcoming races near Denver and Boulder. Tap the <strong>Races</strong> button to browse them, or click any checkered pin on the map to open the Races page with that event highlighted.
+    </p>
+    <p>
+Use the <strong>area picker</strong> at the bottom to show Denver, Boulder, Fort Collins or mountain rides only, and <strong>List</strong> to see the whole day as a list. A ride's area is decided by where it starts.
+    </p>
+    <p>
+      <strong>Share</strong> on a ride card copies a link that opens this map straight on that ride. <strong>Directions</strong> opens the meeting point in Google Maps, and <strong>Add to calendar</strong> saves the ride to Apple Calendar, Outlook or Google Calendar. The button at the bottom of the card opens the organizer's own event page, which is where you join or RSVP; when the organizer posted a registration or waiver link, a green button for it appears above.
+    </p>
+    <p>
+      Rides whose organizer posted no route appear as a start pin only and are marked <strong>No route posted</strong>.
+    </p>
+    <p>
+      Use the <strong>Metric</strong> button to display the ride statistics in km/meters and the temperature in °C.
+    </p>
+
+    <hr>
+
+    <h2>Mobile app</h2>
+    <p>
+      There is no need to download a separate app. This site adapts automatically to phones and tablets.
+      Add it to your home screen for a full-screen, app-like experience.
+    </p>
+    <p>
+      <strong>On Android:</strong> open in Chrome, tap the three-dot menu (⋮) in the top right, and select "Install and create shortcut".
+    </p>
+    <p>
+      <strong>On iPhone:</strong> open in Safari, tap the share button (↑) at the bottom, and select "Add to Home Screen".
+    </p>
+
+    <hr>
+
+    <h2>Contact &amp; credits</h2>
+    <p>
+      Source code, club list and backend:<br>
+      <a href="https://github.com/100-debug/Denver-CC" target="_blank" rel="noopener noreferrer">https://github.com/100-debug/Denver-CC</a>
+    </p>
+    <p>
+      Frontend adapted from Boulder Group Rides (MIT License, © 2026 Roger Bergua):<br>
+      <a href="https://github.com/RBergua/boulderrides" target="_blank" rel="noopener noreferrer">https://github.com/RBergua/boulderrides</a>
+    </p>
+    <p style="font-size:0.8em; color:#666;">
+      Ride details belong to the organizing clubs. Always confirm time, place and pace on the club's own event page before you roll out.
+    </p>
+
+    <hr style="border-top: 2px solid #eee;">
+
+    <!-- Strava attribution required by the Strava API Brand Guidelines. -->
+    <div style="margin: 0px 0 20px; display: flex; justify-content: center; align-items: center; gap: 24px; flex-wrap: wrap; transform: translateX(-4px);">
+      <a href="https://www.strava.com" target="_blank" rel="noopener noreferrer">
+        <img data-src="https://developers.strava.com/images/api_logo_pwrdBy_strava_horiz_light.png" alt="Powered by Strava" style="height: 34px;">
+      </a>
+      <!-- Ride with GPS attribution -->
+      <a href="https://ridewithgps.com" target="_blank" rel="noopener noreferrer">
+        <img data-src="https://ridewithgps.com/images/logos/horizontal-logo.svg" alt="Ride with GPS" style="height: 30px;">
+      </a>
+    </div>
+
+  </div>
+</div>
+
+<!-- Full-screen Races & Events page -->
+<div id="races-page">
+  <button id="races-close" onclick="document.getElementById('races-page').classList.remove('open'); document.querySelectorAll('.race-entry.highlighted').forEach(el => el.classList.remove('highlighted'))">Done</button>
+
+  <div id="races-content">
+
+    <h1>Races &amp; Events</h1>
+
+    <p>
+      Upcoming races and events for the next 2 months across the same area as the rides: the Front Range from Denver to Fort Collins and Colorado's mountain towns. Whether you're racing, spectating, or volunteering, you'll find them here. Data is pulled from the BikeReg API with every data refresh.
+    </p>
+    <p style="font-size:0.9em; color:#888;">
+      Major events that are not listed on <a href="https://www.bikereg.com" target="_blank" rel="noopener noreferrer">bikereg.com</a> can be added by hand in the backend (<code>backend/extra_events.json</code>).
+    </p>
+
+    <hr class="static">
+  </div>
+
+  <!-- BikeReg attribution: outside races-content so it renders after the dynamically appended race entries -->
+  <p id="bikereg-attribution" style="display: none; text-align: center; max-width: 640px; margin: 0 auto 20px;">
+    <span style="font-size:0.8em; color:#888;">Race data from <a href="https://www.bikereg.com" target="_blank" rel="noopener noreferrer">BikeReg</a></span>
+  </p>
+
+</div>
+
+<!-- MapLibre GL JS -->
+<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script> <!-- Using a pinned version, so updates down the road do not break the site -->
+
+<script>
+// -------------------------------
+// Immediately Invoked Function Expression (IIFE) to avoid polluting global scope. All code runs inside this function.
+// -------------------------------
+(() => {
+
+  // -------------------------------
+  // Device detection: detect touch device.
+  // -------------------------------
+  // true on phones/tablets (touch), false on desktop (mouse).
+
+  const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
+  console.log("isTouchDevice:", isTouchDevice); // Check if we detect computer vs mobile devices properly (CTRL+SHIFT+I in browser to open console)
+
+  // -------------------------------
+  // Unit formatting helpers
+  //--------------------------------
+  // Converts "HH:MM" (24-hour format) to "H:MM AM/PM" (12-hour format). More common in the US.
+  function formatTime12h(timeStr) {
+    let [hour, minute] = timeStr.split(":").map((v, i) => i === 0 ? parseInt(v, 10) : v); // Spliting into hour and minute. For the hour, convert to integer (to do some math below)
+    const ampm = hour >= 12 ? "PM" : "AM"; // hours 12–23 are PM, hours 0–11 are AM
+    hour = hour % 12 || 12; // convert to 12-hour fomat. hour÷12 remainder: 13→1, 14→2 … but 0 and 12 both give remainder 0, so || 12 replaces that with 12.
+    return `${hour}:${minute} ${ampm}`;
+  }
+
+  // Formats a distance (stored in miles) as either mi or km (based on Metric flag).
+  function formatDistance(miles) {
+    return metricUnits
+      ? (miles * 1.609344).toFixed(1) + ' km' // From miles to km
+      : miles.toFixed(1) + ' mi'; // The JSON file has already the units in miles
+  }
+
+   // Formats an elevation gain (stored in feet) as either ft or m (based on Metric flag).
+  function formatElevation(feet) {
+    return metricUnits
+      ? Math.round(feet * 0.3048).toLocaleString() + ' m' // From feet to meters
+      : feet.toLocaleString() + ' ft'; // The JSON file has already the units in feet
+  }
+
+  // -------------------------------
+  // Pin marker (start point)
+  // -------------------------------
+  // lnglat : [lng, lat] in MapLibre order
+  // color  : fill color (ignored when checkered)
+  // checkered : true for race pins — fills the pin with a B&W checkered pattern
+  // Returns a maplibregl.Marker already positioned.
+  function createPinMarker(lnglat, color, checkered = false) {
+    const PIN_PATH = "M12 0 C5.4 0 0 5.4 0 12 C0 21 12 32 12 32 C12 32 24 21 24 12 C24 5.4 18.6 0 12 0 Z";
+
+    let pinContent;
+    if (checkered) { // Checkered pin for races
+      const uid = Math.random().toString(36).slice(2); // unique id so multiple pins don't share the same clipPath
+
+      const TILE = 6; // tile size for the checkered pattern; smaller tiles = more detailed pattern
+
+      let rects = "";
+
+      for (let row = 0; row < Math.ceil(32 / TILE); row++)
+        for (let col = 0; col < Math.ceil(24 / TILE); col++)
+          rects += `<rect x="${col*TILE}" y="${row*TILE}" width="${TILE}" height="${TILE}" fill="${(col+row)%2===0 ? 'white' : 'black'}"/>`;
+
+       pinContent = `<defs><clipPath id="cp-${uid}"><path d="${PIN_PATH}"/></clipPath></defs>
+          <g clip-path="url(#cp-${uid})">${rects}</g>
+          <path d="${PIN_PATH}" fill="none" stroke="black" stroke-width="2"/>`;
+    } else {
+      pinContent = `<path d="${PIN_PATH}" fill="${color}" stroke="white" stroke-width="1.5"/>
+        <circle cx="12" cy="12" r="5" fill="white"/>`;
+    }
+
+    const el = document.createElement('div');
+    el.innerHTML = `<svg width="24" height="32" viewBox="-1 -1 26 34" xmlns="http://www.w3.org/2000/svg">${pinContent}</svg>`;
+    el.style.cssText = 'cursor:pointer; width:24px; height:32px;';
+    if (checkered) el.style.cssText += ' position:relative; z-index:400;'; // Only race pins need the higher stacking order to be in front of routes or regular pins
+    return new maplibregl.Marker({ element: el, anchor: 'bottom' }).setLngLat(lnglat);
+  }
+
+  // -------------------------------
+  // Logos inside the "More" and "Races" pages (e.g., Strava and Ride with GPS) carry data-src.
+  // They are not downloaded while the map loads.
+  // They start downloading when one of those pages is opened (the club list is preloaded once the map is idle).
+  // -------------------------------
+  function loadDeferredImages(page) {
+    page.querySelectorAll('img[data-src]').forEach(img => {
+      img.src = img.dataset.src;
+      img.removeAttribute('data-src');
+    });
+  }
+
+  // -------------------------------
+  // "More" page data: club badges (data/clubs.json) and the last-update line (data/status.json).
+  // Loaded once the map is idle, refreshed when "More" is opened if older than MIN_REFRESH_INTERVAL.
+  // -------------------------------
+  let infoRefreshedAt = 0; // 0 = never loaded
+
+  // Escapes text that comes from club/event pages before it is inserted as HTML.
+  function esc(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+  }
+  // Only http(s) links are allowed through to href attributes.
+  function safeUrl(url) {
+    return /^https?:\/\//i.test(String(url ?? '')) ? esc(url) : '#';
+  }
+
+  async function refreshInfoPageData() {
+    infoRefreshedAt = Date.now();
+    try {
+      const res = await fetchData('clubs.json', { cache: 'no-cache' });
+      const clubs = await res.json();
+      const box = document.getElementById('club-badges');
+      box.innerHTML = clubs.map(c => {
+        const cls   = c.region === 'boulder' ? ' boulder' : (c.active ? '' : ' pending');
+        const badge = `<span class="sheet-badge${cls}">${esc(c.name)}</span>`;
+        return c.url ? `<a href="${safeUrl(c.url)}" target="_blank" rel="noopener noreferrer">${badge}</a>` : badge;
+      }).join('');
+    } catch {}
+    try {
+      const res = await fetchData('status.json', { cache: 'no-cache' });
+      const status = await res.json();
+      const when = new Date(status.generated_at);
+      if (!isNaN(when)) {
+        document.getElementById('data-status').textContent =
+          ' Data last updated ' + when.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '.';
+      }
+    } catch {}
+  }
+
+  window.openInfoPage = function() { // window. prefix makes this function accessible from the HTML button element.
+    const infoPage = document.getElementById('info-page');
+    infoPage.classList.add('open');
+
+    if (Date.now() - infoRefreshedAt >= MIN_REFRESH_INTERVAL) refreshInfoPageData();
+    loadDeferredImages(infoPage);
+  }
+
+  // -------------------------------
+  // Map initialization
+  // MapLibre GL JS map (vector tiles)
+  // MapLibre note: coordinates are always [lng, lat] (longitude first), unlike Leaflet's [lat, lng].
+  // -------------------------------
+  // Downtown Denver, CO. Stored as [lat, lng] for readability; converted later on to [lng, lat] for MapLibre.
+  const DEFAULT_CENTER = [39.7392, -104.9903];
+  const DEFAULT_ZOOM = 11;
+  // Map view used when an area is selected and the day has nothing to fit to.
+  const REGION_VIEWS = {
+    all:       { label: 'All',          center: [39.95, -105.15],       zoom: 8.6 },
+    denver:    { label: 'Denver',       center: DEFAULT_CENTER,         zoom: DEFAULT_ZOOM },
+    boulder:   { label: 'Boulder',      center: [40.01499, -105.27055], zoom: 12 },
+    foco:      { label: 'Fort Collins', center: [40.5853, -105.0844],   zoom: 11 },
+    mountains: { label: 'Mountains',    center: [39.55, -106.35],       zoom: 8 },
+  };
+
+  // ── Event Banner ──────────────────────────────────────────────────────────────
+  // Reads banner.json and shows the banner only if today falls within [start, end].
+  // This info is available in assets/banners/banner.json.
+  // If the file is missing, malformed, or dates are expired → banner stays hidden.
+  // The PNG will scale to the height below at its natural width.
+  const BANNER_HEIGHT_MOBILE_PX  = 65;  // Mobile: smaller, doesn't block much of the map
+  const BANNER_HEIGHT_DESKTOP_PX = 100; // Desktop: larger, more visible on bigger screens
+
+  // Pick the right size based on whether this is a touch device
+  const BANNER_HEIGHT_PX = isTouchDevice ? BANNER_HEIGHT_MOBILE_PX : BANNER_HEIGHT_DESKTOP_PX;
+
+  (async function initBanner() {
+    try {
+      // Fetch the banner config. no-store ensures we always get the latest version.
+      const res    = await fetch('assets/banners/banner.json', { cache: 'no-store' });
+      if (!res.ok) return; // File missing or server error. Stop silently
+
+      const banner = await res.json();
+
+      // Compare today's date (midnight local time) against the banner's date window
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const start = new Date(banner.start + 'T00:00:00');
+      const end   = new Date(banner.end   + 'T00:00:00');
+
+      // If no image is defined, or we're outside the active date window we do nothing
+      if (!banner.src || today < start || today > end) return;
+
+      const wrapper = document.getElementById('event-banner');
+      const img     = document.getElementById('event-banner-img');
+      const link    = document.getElementById('event-banner-link');
+
+      // Set the image source and height. Width is natural (not stretched).
+      // To resize the banner, we should change BANNER_HEIGHT_PX above.
+      img.src             = banner.src;
+      img.style.height    = BANNER_HEIGHT_PX + 'px';
+
+      link.href           = banner.link || '#';
+      wrapper.style.display = 'block';
+
+      // Expose the banner height globally so fitBounds can add top padding,
+      // keeping routes from being drawn underneath the banner.
+      window._bannerHeightPx = BANNER_HEIGHT_PX;
+
+      // If there is a banner, the weather widget won't fit at the top in the mobile version.
+      //   Desktop: leave the weather widget at its position. There is plenty of room.
+      //   Mobile: relocate it to the bottom-left, next to the hamburger menu button.
+      const weatherWidget = document.getElementById('weather-widget');
+      if (weatherWidget) {
+        if (isTouchDevice) {
+          weatherWidget.style.top    = 'auto';
+          weatherWidget.style.bottom = '15px';   // align with #menu-toggle-btn
+          weatherWidget.style.left   = '100px'; // clears the 44px-wide hamburger button (left:16px, so it spans to 60px)
+          weatherWidget.style.right  = 'auto';
+        }
+        // Desktop: no change. Weather widget stays at its default top-right position.
+      }
+
+    } catch (e) {
+      // Fail silently. Banner simply won't appear
+    }
+  })();
+
+  // Loading overlay helpers (progress bar)
+  // setProgress(pct, label) advances the blue fill bar to `pct` % and optionally
+  // updates the status label.
+  // hideLoadingOverlay() snaps the bar to 100 %, waits 500 ms for the fill
+  // transition to finish (e.g., map zooming), then fades the overlay out via the .hidden class.
+  const loadingOverlay = document.getElementById('loading-overlay');
+  const loadingBarFill = document.getElementById('loading-bar-fill');
+  const loadingLabel   = document.getElementById('loading-label');
+  let   _progress      = 0;
+
+  function setProgress(pct, label) {
+    _progress = Math.max(_progress, pct);       // never go backward
+    loadingBarFill.style.width = _progress + '%';
+    if (label) loadingLabel.textContent = label;
+  }
+
+  function hideLoadingOverlay() {
+    setProgress(100);                           // snap bar to full
+    setTimeout(() => loadingOverlay.classList.add('hidden'), 500); // wait for fill transition, then fade out
+  }
+
+  // Refresh toast helper. Used when the user returns to the app after 5 minutes or more.
+  // state: 'checking' (blue, stays until replaced by a result), 'success' (green) or 'error' (red).
+  // Results fade out after 5 s.
+  const refreshToast = document.getElementById('refresh-toast');
+  let refreshToastTimer = null;
+
+  function showRefreshToast(message, state) {
+    clearTimeout(refreshToastTimer); // A stale timer must not hide a newer message
+    refreshToast.textContent = message;
+    refreshToast.classList.remove('checking', 'success', 'error');
+    refreshToast.classList.add(state);
+    refreshToast.classList.add('visible');
+    if (state !== 'checking') {
+      refreshToastTimer = setTimeout(() => refreshToast.classList.remove('visible'), 5000); // 5 s
+    }
+  }
+
+  // Map tiles: OpenFreeMap (free, no API key, no request limits) by default.
+  // To use MapTiler Outdoors instead (terrain shading, trails), create a key at maptiler.com, lock it to
+  // this site's domain, and paste it below. If MapTiler then fails (e.g., quota exceeded), the map falls back to OpenFreeMap.
+  const MAPTILER_API_KEY = '';
+  const fallbackStyleUrl = 'https://tiles.openfreemap.org/styles/liberty';
+  const maptilerStyleUrl = MAPTILER_API_KEY
+    ? `https://api.maptiler.com/maps/outdoor-v2/style.json?key=${MAPTILER_API_KEY}`
+    : fallbackStyleUrl;
+
+  // Direction arrows. Each route gets its own arrow icon, colored to match the route line.
+  const arrowImageIds = new Set();
+  function getArrowImageId(color) {
+    const id = 'route-arrow-' + color.replace(/[^a-zA-Z0-9]/g, '');
+    if (arrowImageIds.has(id)) return id;
+    arrowImageIds.add(id);
+
+    const canvas = document.createElement('canvas');
+    canvas.width  = 56;
+    canvas.height = 40;
+    const ctx = canvas.getContext('2d');
+
+    // Rounded-rect background in the route's own color, with a soft drop shadow
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.35)';
+    ctx.shadowBlur = 4;
+    ctx.shadowOffsetY = 1;
+    ctx.beginPath();
+    ctx.roundRect(2, 2, 50, 34, 12); // x, y, width, height, radius. Related to canvas.width and canvas.height above.
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.restore();
+
+    // Subtle light border so the badge reads clearly against the route line
+    ctx.beginPath();
+    ctx.roundRect(2, 2, 50, 34, 12);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.stroke();
+
+    // Solid white arrow (shaft + triangular head as one filled shape),
+    // pointing right. MapLibre rotates it to follow the route.
+    // Coordinates are centered within the rounded-rect above (2,2,50,34).
+    ctx.beginPath();
+    ctx.moveTo(9.5, 16);
+    ctx.lineTo(23.5, 16);
+    ctx.lineTo(23.5, 8);
+    ctx.lineTo(44.5, 19);
+    ctx.lineTo(23.5, 30);
+    ctx.lineTo(23.5, 22);
+    ctx.lineTo(9.5, 22);
+    ctx.closePath();
+    ctx.fillStyle = 'white';
+    ctx.fill();
+
+    map.addImage(id, ctx.getImageData(0, 0, canvas.width, canvas.height), { pixelRatio: 2, sdf: false });
+    return id;
+  }
+
+  // Start with the primary style. If it fails to load (e.g., MapTiler quota exceeded), swap to the fallback once.
+  const map = new maplibregl.Map({
+    container: 'map',
+    style:     maptilerStyleUrl,
+    center:    [DEFAULT_CENTER[1], DEFAULT_CENTER[0]], // MapLibre: [lng, lat]
+    zoom:      DEFAULT_ZOOM,
+    maxZoom:   16,
+  });
+
+  // If the primary style fails to load, silently fall back (only once, and only if there is a different style to fall back to).
+  let styleFallbackUsed = maptilerStyleUrl === fallbackStyleUrl;
+  map.on('error', (e) => {
+    if (styleFallbackUsed) return;
+    if (e.error?.message?.toLowerCase().includes('style') ||
+        e.error?.status === 401 || e.error?.status === 403) {
+      styleFallbackUsed = true;
+      console.warn('Primary map style unavailable, falling back to OpenFreeMap');
+      map.setStyle(fallbackStyleUrl, { diff: false });  // Do a clean style replacement
+    }
+  });
+
+  // Mobile browsers can change the viewport (address bar show/hide) without MapLibre noticing, leaving a blank gap
+  // at the bottom. Re-sync the canvas to its container whenever the viewport changes.
+  let mapResizeFrame = 0;
+  const syncMapSize = () => {
+    cancelAnimationFrame(mapResizeFrame);
+    mapResizeFrame = requestAnimationFrame(() => map.resize());
+  };
+  window.addEventListener('resize', syncMapSize);
+  window.addEventListener('orientationchange', syncMapSize);
+  window.visualViewport?.addEventListener('resize', syncMapSize);
+
+  // Returning from another page (e.g. detailed weather via history.back()) restores this page from the back/forward
+  // cache with a stale canvas size, and Android's address bar may still be settling. Resize now and again shortly after.
+  const syncMapSizeAfterReturn = () => {
+    syncMapSize();
+    setTimeout(syncMapSize, 300);
+  };
+  window.addEventListener('pageshow', (e) => { if (e.persisted) syncMapSizeAfterReturn(); });
+
+  setProgress(10, 'Loading group rides…');     // Progress bar. Milestone 1: map object created
+
+  // Map credits stay behind the (i) button instead of opening as a bar across the map
+  map.once('load', () => document.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show'));
+
+  // Zoom in/out buttons (compass hidden)
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
+
+  // Tracks the currently visible desktop hover popup
+  let activePopup = null;
+  const rideHitLayerIds = new Set();
+
+  // MapLibre layer clicks also reach this listener; only dismiss on empty map.
+  map.on('click', e => {
+    const layers = [...rideHitLayerIds];
+    if (layers.length && map.queryRenderedFeatures(e.point, { layers }).length) return;
+    closeSheet();
+  });
+
+  // -------------------------------
+  // Load routes from club_rides.json, races from races.json, and weather from weather.json
+  // -------------------------------
+  // These 3 files live on the 'data' branch (not 'main'). See DATA_BASE_URL in <head>.
+  // Rides grouped by date: { "YYYY-MM-DD": [ride, ride, ...], ... }
+  let ridesByDate = {};
+
+  // Races grouped by date: { "YYYY-MM-DD": [race, race, ...], ... }
+  // A multi-day race appears under each of its dates.
+  let racesByDate = {};
+
+  // Every ride from club_rides.json, before the area filter is applied.
+  let allRides = [];
+
+  // Area filter: 'all' | 'denver' | 'boulder'. Remembered between visits.
+  let regionFilter = 'all';
+  try {
+    const saved = localStorage.getItem('regionFilter');
+    if (saved && REGION_VIEWS[saved]) regionFilter = saved;
+  } catch {}
+
+  // Groups rides by date, keeping only rides in the selected area.
+  // Rides without a region (older data) are treated as Denver rides.
+  function groupRides(rides) {
+    const byDate = {};
+    for (const ride of rides) {
+      if (regionFilter !== 'all' && (ride.region || 'denver') !== regionFilter) continue;
+      const date = ride.date.split(" ")[0]; // Extract YYYY-MM-DD
+      (byDate[date] ||= []).push(ride);
+    }
+    return byDate;
+  }
+
+  // Loads initial rides data concurrently and plots them once map is ready
+  //console.time('[PERF] app start → club_rides.json ready'); // Debugging performance
+  const ridesReady = (async () => {
+    const res = await fetchData('club_rides.json', { cache: 'no-cache' }); // Same URL as the <link rel="preload"> in <head>, so the browser reuses that download. 'no-cache' = check with the server before reusing a saved copy. Refresh interval is 5 min.
+    const rides = await res.json();
+    saveSnapshot('club_rides.json', rides); // Store a snapshot of the data for future change detection
+    //console.timeEnd('[PERF] app start → club_rides.json ready'); // Debugging performance
+    setProgress(50, 'Loading races…');          // Progress bar. Milestone 2: ride data ready
+
+    // Group rides by date (YYYY-MM-DD), keeping only the selected area
+    allRides = rides;
+    ridesByDate = groupRides(rides);
+  })();
+
+  // Flat list of all races from races.json, used by the Races page to show 2 months of events.
+  let allRaces = [];
+
+  const racesReady = (async () => {
+    const res = await fetchData('races.json', { cache: 'no-cache' }); // See club_rides.json above
+    allRaces = await res.json();
+    saveSnapshot('races.json', allRaces);  // Store a snapshot of the data for future change detection
+    setProgress(75, 'Preparing map…');          // Progress bar. Milestone 3: race data ready
+
+    // Group races by date (YYYY-MM-DD). A multi-day race is indexed under each of its dates.
+    for (const race of allRaces) {
+      const dates = Array.isArray(race.date) ? race.date : [race.date];
+      for (const d of dates) {
+        const iso = formatLocalDate(parseLocalDate(d));
+
+        if (!racesByDate[iso]) racesByDate[iso] = [];
+        racesByDate[iso].push(race);
+      }
+    }
+  })();
+
+  // Load weather from weather.json
+  const ENABLE_WEATHER = true; // Flag to enable/disable weather widget
+
+  // Weather grouped by date: { "YYYY-MM-DD": [ {time, temperature_F, description, symbol}, ... ] }
+  let weatherByDate = {};
+
+  const weatherReady = (async () => {
+    if (!ENABLE_WEATHER) return;
+    try {
+      const res = await fetchData('weather.json', { cache: 'no-cache' }); // See club_rides.json above
+      weatherByDate = await res.json();
+      saveSnapshot('weather.json', weatherByDate);  // Store a snapshot of the data for future change detection
+    } catch {
+      weatherByDate = {}; // Missing/broken file. updateWeather() will just hide the widget
+    }
+  })();
+
+  // Renders the forecast for a given "YYYY-MM-DD" date into the weather widget.
+  // Called once generateCalendar() picks the initial day, and again whenever
+  // the user clicks a different day.
+  function updateWeather(isoDate) {
+    const widget = document.getElementById('weather-widget');
+    if (!ENABLE_WEATHER) return;
+
+    const entries = weatherByDate[isoDate];
+
+    // No data available? Just hide the widget.
+    if (!entries) {
+      widget.style.display = 'none';
+      return;
+    }
+
+    // Render each time slot (e.g. "9 AM", "4 PM") on its own line, separated by a divider.
+    widget.style.display = '';
+    widget.innerHTML = entries.map(e => {
+      const temp = metricUnits // Output in Celsius or Fahrenheit
+        ? Math.round((e.temperature_F - 32) * 5 / 9) + '°C' // From °F to °C. No decimal positions
+        : e.temperature_F + '°F';
+      return `<div><span style="color:#888;">${e.time}</span><br>${e.symbol} <span style="color:#007bff; font-weight:bold;">${temp}</span></div>`;
+    }).join('<hr style="border:none; border-top:1px solid #eee; margin:3px 0;">');
+  }
+
+  // Flag to enable/disable the detailed weather action in the ride card
+  const ENABLE_DETAILED_WEATHER = true;
+
+  // Set of "<ride_title>|<date>" keys whose detailed forecast has status "available"
+  let detailedWeatherKeys = new Set();
+
+  // Rebuilds the keys from detailed_weather.json data and refreshes the open ride card, if any.
+  function applyDetailedWeather(data) {
+    detailedWeatherKeys = new Set();
+    for (const r of data.rides || []) {
+      if (r.status === 'available') detailedWeatherKeys.add(r.ride_title + '|' + r.date);
+    }
+    if (selectedRide) updateSheetWeather(selectedRide);
+  }
+
+  (async () => {
+    if (!ENABLE_DETAILED_WEATHER) return;
+    try {
+      const res = await fetchData('detailed_weather.json', { cache: 'no-cache' }); // See club_rides.json above
+      const data = await res.json();
+      saveSnapshot('detailed_weather.json', data);  // Store a snapshot of the data for future change detection
+      applyDetailedWeather(data);
+    } catch {
+      detailedWeatherKeys = new Set(); // Missing/broken file. The "Weather" button just stays hidden
+    }
+  })();
+
+  // Wait for the map style, ride data, race data and weather data before rendering.
+  // Whichever finishes last triggers generateCalendar().
+  // Uses 'style.load' instead of 'load': 'load' only fires once. If the primary style fails
+  // and we swap to the fallback style, 'load' would never fire and the app would stay stuck.
+  // 'style.load' fires for every style change.
+  //console.time('[PERF] app start → map ready'); // Debugging performance
+  let mapReady = false;
+  map.on('style.load', () => {
+    if (mapReady) return; // Only run the readiness sequence once
+    mapReady = true;
+    //console.timeEnd('[PERF] app start → map ready'); // Debugging performance
+    setProgress(90, 'Almost there…');           // Progress bar. Milestone 4: map style loaded
+    Promise.all([ridesReady, racesReady, weatherReady]).then(() => { // Wait for all to finish
+      generateCalendar();
+      hideLoadingOverlay();                     // Progress bar. Milestone 5: all done — fade out overlay
+      map.once('idle', refreshInfoPageData);    // Map fully rendered: now preload the club list for the "More" page
+    });
+  });
+
+  // -------------------------------
+  // Old data in long-lived sessions (smart refresh on visibility restore)
+  // -------------------------------
+  // We re-request each JSON file with cache: 'no-cache', so the browser revalidates with the server
+  // (a cheap "304 Not Modified" when nothing changed) and then compare the content against the snapshot
+  // of what's currently displayed. GitHub's raw host sends no Last-Modified, so comparing the content
+  // is the only reliable way to detect a change.
+
+  let calendarAnchorDate = formatLocalDate(new Date()); // The date on which the calendar was last generated
+  let refreshInProgress  = false; // Prevents overlapping background refreshes
+
+  // Files kept fresh. snapshot = JSON string of the data currently displayed (null = unknown).
+  // checkedAt = last successful check.
+  const refreshFiles = [
+    'club_rides.json',
+    'races.json',
+    ...(ENABLE_WEATHER ? ['weather.json'] : []),
+    ...(ENABLE_DETAILED_WEATHER ? ['detailed_weather.json'] : [])
+  ].map(name => ({ name, snapshot: null, checkedAt: Date.now() }));
+
+  // Saves a text copy (snapshot) of the data currently displayed. On a refresh, the freshly fetched data
+  // is compared against it: identical → "Up to date", different → apply it and show "Updated".
+  function saveSnapshot(fileName, data) {
+    const file = refreshFiles.find(f => f.name === fileName);
+    if (file) file.snapshot = JSON.stringify(data);
+  }
+
+  // Minimum time between checks.
+  // Prevents excessive network calls when users rapidly switch tabs/apps.
+  // Also used to refresh the club list on the "More" page.
+  const MIN_REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes in ms
+
+  // Fetches a JSON file, revalidating with the server. Returns null if it could not be fetched.
+  async function fetchJson(fileName) {
+    try {
+      const res = await fetchData(fileName, { cache: 'no-cache' });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null; // No network / server unreachable / invalid JSON
+    }
+  }
+
+  // Listen for when the tab/app becomes visible again
+  // This is especially important for PWA/mobile users who background the app
+  // The map stays visible during the check; progress is reported through the refresh toast.
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState !== 'visible') return; // We only refresh when the user returns, not when they leave
+    syncMapSizeAfterReturn();
+    if (refreshInProgress) return;
+
+    const now        = Date.now();
+    const todayDate  = formatLocalDate(new Date());
+    const dayChanged = todayDate !== calendarAnchorDate; // If the calendar was built on a previous day, rebuild it now regardless of the MIN_REFRESH_INTERVAL. The day has rolled over!
+
+    // Debounce: skip (silently) if every file was checked very recently (≤5 min) and the day hasn't rolled over.
+    // A day rollover makes all files due, since the forecast moves with the date.
+    const due = refreshFiles.filter(f => dayChanged || now - f.checkedAt >= MIN_REFRESH_INTERVAL);
+    if (!due.length) return;
+
+    refreshInProgress = true;
+    showRefreshToast('Checking for updates…', 'checking');
+
+    try {
+      // Check only the files that passed the debounce window
+      const results = await Promise.all(due.map(f => fetchJson(f.name)));
+
+      // Update check timestamps only for files that were fetched, so failures are retried next time
+      const checkedAt = Date.now();
+      due.forEach((f, i) => { if (results[i] !== null) f.checkedAt = checkedAt; });
+
+      const checkFailed = results.includes(null);
+
+      // Rebuild calendar if the day rolled over (always, regardless of data)
+      if (dayChanged) {
+        calendarAnchorDate = todayDate;
+        document.getElementById('calendar').innerHTML = ''; // Clear old day columns
+        generateCalendar();
+        // console.log('Day changed, calendar rebuilt.'); // Testing
+      }
+
+      // Only apply files whose content differs from what is displayed
+      const downloaded = {};
+      const changedFiles = [];
+      due.forEach((f, i) => {
+        if (results[i] === null) return;
+        const newSnapshot = JSON.stringify(results[i]);
+        if (newSnapshot === f.snapshot) return;
+        changedFiles.push({ file: f, newSnapshot });
+        downloaded[f.name] = results[i];
+      });
+
+      // Nothing changed
+      if (!changedFiles.length) {
+        if (checkFailed) showRefreshToast('Could not check for updates', 'error');
+        else showRefreshToast('✓ Up to date', 'success');
+        return;
+      }
+
+      const rides           = downloaded['club_rides.json'];
+      const races           = downloaded['races.json'];
+      const weather         = downloaded['weather.json'];
+      const detailedWeather = downloaded['detailed_weather.json'];
+
+      // ── Update rides ──────────────────────────────────────────────────────
+      const ridesChanged = !!rides;
+      if (rides) { // Rebuild ridesByDate with fresh data
+        allRides = rides;
+        ridesByDate = groupRides(rides);
+      }
+
+      // ── Update races ──────────────────────────────────────────────────────
+      if (races) {
+        const newRacesByDate = {};
+        races.forEach(race => {
+          const dates = Array.isArray(race.date) ? race.date : [race.date];
+          dates.forEach(date => {
+            const iso = formatLocalDate(parseLocalDate(date));  // normalize to YYYY-MM-DD, same as rides
+            if (!newRacesByDate[iso]) newRacesByDate[iso] = [];
+            newRacesByDate[iso].push(race);
+          });
+        });
+        racesByDate = newRacesByDate;
+        allRaces    = races;
+      }
+
+      // ── Refresh calendar day highlights ───────────────────────────────────
+      if (ridesChanged || races) { refreshDayColumns(); renderAreaBar(); }
+
+      // ── Re-render selected day only if rides content actually changed ─────
+      if (ridesChanged) {
+        const selected = document.querySelector('.day-column.selected');
+        if (selected?.dataset.date) {
+          if (map.isStyleLoaded()) {
+            loadRoutes(selected.dataset.date);
+          } else {
+            map.once('style.load', () => loadRoutes(selected.dataset.date));
+          }
+        }
+      }
+
+      // ── Update weather ────────────────────────────────────────────────────
+      if (weather) {
+        weatherByDate = weather;
+        const selected = document.querySelector('.day-column.selected');
+        if (selected?.dataset.date) updateWeather(selected.dataset.date);
+      }
+      if (detailedWeather) applyDetailedWeather(detailedWeather);
+
+      // Remember what is now displayed, so the next check compares against it
+      changedFiles.forEach(({ file, newSnapshot }) => { file.snapshot = newSnapshot; });
+
+      if (checkFailed) showRefreshToast('Updated, but some data could not be checked', 'error');
+      else showRefreshToast('✓ Updated', 'success');
+
+    } catch (error) {
+      // Keep existing data; the download is retried after the debounce window
+      console.warn('Background data refresh failed:', error);
+      showRefreshToast('Update failed. Showing existing data', 'error');
+
+    } finally {
+      refreshInProgress = false;
+    }
+  });
+
+  // -------------------------------
+  // Shared ride details
+  // -------------------------------
+  const sheet      = document.getElementById("ride-sheet");
+  const sheetBar   = document.getElementById("sheet-color-bar");
+  const sheetClub  = document.getElementById("sheet-club");
+  const sheetTitle = document.getElementById("sheet-title");
+  const sheetMeta  = document.getElementById("sheet-meta");
+  const sheetBtn   = document.getElementById("sheet-source-btn");
+  const metricBtn   = document.getElementById('metric-btn');
+  const menuToggleBtn = document.getElementById('menu-toggle-btn');
+  const menuPanel      = document.getElementById('menu-panel');
+
+  // Opens/closes the hamburger menu panel (More / Races / GPX/List / Metric).
+  // window. prefix makes these accessible from the HTML button elements (see openInfoPage above).
+  window.toggleMenuPanel = function(event) {
+    event.stopPropagation(); // don't let this click bubble up and immediately close the panel
+    menuPanel.classList.toggle('open');
+  };
+  window.closeMenuPanel = function() {
+    menuPanel.classList.remove('open');
+  };
+  // Clicking anywhere outside the panel (and outside the hamburger button) closes it.
+  document.addEventListener('click', (event) => {
+    if (!menuPanel.classList.contains('open')) return;
+    if (menuPanel.contains(event.target) || menuToggleBtn.contains(event.target)) return;
+    closeMenuPanel();
+  });
+
+  let metricUnits  = false; // default to imperial; toggled by the Metric button
+  let currentHL   = null;   // segmentLines array for the selected route
+  let selectedRide = null;
+  // Assigned inside loadRoutes; called by closeSheet to undo highlighting on dismiss
+  let restoreAllRoutes = null;
+
+  // Toggle Metric button and refresh the text that shows units. Units only affect text,
+  // so the map layers, markers, selection and view are left untouched.
+  metricBtn.addEventListener('click', () => {
+    metricUnits = !metricUnits;
+    metricBtn.classList.toggle('active', metricUnits);
+    metricBtn.setAttribute('aria-checked', metricUnits);
+    const selected = document.querySelector('.day-column.selected');
+    if (selected?.dataset.date) updateWeather(selected.dataset.date);
+    if (selectedRide) { renderSheetMeta(selectedRide); renderProfile(selectedRide); }
+    if (listPanel.classList.contains('open')) renderList();
+  });
+
+  // -------------------------------
+  // Area chips, day list, sharing
+  // -------------------------------
+  const REGION_ORDER = ['all', 'denver', 'boulder', 'foco', 'mountains'];
+  const areaBar   = document.getElementById('area-bar');
+  const listPanel = document.getElementById('list-panel');
+  const selectedDate = () => document.querySelector('.day-column.selected')?.dataset.date || null;
+  const sortedRides  = date => [...(ridesByDate[date] || [])].sort((a, b) => a.date.localeCompare(b.date) || a.club_name.localeCompare(b.club_name));
+
+  // Marks which days have rides/races and shows the ride count on each day.
+  function refreshDayColumns() {
+    document.querySelectorAll('.day-column').forEach(col => {
+      const date  = col.dataset.date;
+      const count = ridesByDate[date]?.length || 0;
+      col.classList.toggle('ride-day', count > 0 || (racesByDate[date]?.length || 0) > 0);
+      let badge = col.querySelector('.day-count');
+      if (count) {
+        if (!badge) { badge = document.createElement('div'); badge.className = 'day-count'; col.appendChild(badge); }
+        badge.textContent = count + (count === 1 ? ' ride' : ' rides');
+        col.setAttribute('aria-label', `${col.title}, ${count} ride${count === 1 ? '' : 's'}`);
+      } else {
+        badge?.remove();
+        col.setAttribute('aria-label', `${col.title}, no rides`);
+      }
+    });
+  }
+
+  // Builds the bottom controls: a segmented area picker (with the selected day's ride counts) and the List button.
+  const REGION_SHORT = { foco: 'FoCo', mountains: 'Mtns' };
+  function renderAreaBar() {
+    const date = selectedDate();
+    const dayRides = allRides.filter(r => r.date.split(' ')[0] === date);
+    areaBar.innerHTML = '';
+    const seg = document.createElement('div');
+    seg.id = 'area-seg';
+    seg.setAttribute('role', 'group');
+    for (const key of REGION_ORDER) {
+      const n = key === 'all' ? dayRides.length : dayRides.filter(r => (r.region || 'denver') === key).length;
+      const label = REGION_VIEWS[key].label;
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'area-chip' + (key === regionFilter ? ' active' : '');
+      chip.setAttribute('aria-pressed', key === regionFilter);
+      chip.setAttribute('aria-label', `${label}, ${n} ride${n === 1 ? '' : 's'}`);
+      chip.innerHTML = `<span class="long">${label}</span><span class="short">${REGION_SHORT[key] || label}</span><span class="n">${n}</span>`;
+      chip.addEventListener('click', () => setRegion(key));
+      seg.appendChild(chip);
+    }
+    areaBar.appendChild(seg);
+    const listBtn = document.createElement('button');
+    listBtn.type = 'button';
+    listBtn.id = 'list-fab';
+    listBtn.setAttribute('aria-label', 'Show the day as a list');
+    listBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1" fill="currentColor"/><circle cx="4.5" cy="12" r="1" fill="currentColor"/><circle cx="4.5" cy="18" r="1" fill="currentColor"/></svg><span class="txt">List</span>`;
+    listBtn.addEventListener('click', e => { e.stopPropagation(); toggleList(); });
+    areaBar.appendChild(listBtn);
+    seg.querySelector('.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  function setRegion(key, { reload = true } = {}) {
+    regionFilter = key;
+    try { localStorage.setItem('regionFilter', regionFilter); } catch {}
+    ridesByDate = groupRides(allRides);
+    refreshDayColumns();
+    const date = selectedDate();
+    if (reload && date) {
+      loadRoutes(date);
+      // Nothing to fit the map to on this day: show the selected area instead
+      if (!(ridesByDate[date]?.length) && !(racesByDate[date]?.length)) {
+        const view = REGION_VIEWS[regionFilter];
+        map.jumpTo({ center: [view.center[1], view.center[0]], zoom: view.zoom });
+      }
+    }
+    renderAreaBar();
+    if (listPanel.classList.contains('open')) renderList();
+  }
+
+  // Zooms the map to one ride (its route, or its start pin when no route was posted).
+  function focusRide(ride) {
+    if (ride.route?.length) {
+      let w = Infinity, e = -Infinity, s = Infinity, n = -Infinity;
+      for (const pt of ride.route) { w = Math.min(w, pt[1]); e = Math.max(e, pt[1]); s = Math.min(s, pt[0]); n = Math.max(n, pt[0]); }
+      const mapEl = document.getElementById('map');
+      map.fitBounds([[w, s], [e, n]], { padding: { top: 40, bottom: Math.round(mapEl.clientHeight * (isTouchDevice ? 0.5 : 0.1)), left: 40, right: 40 }, maxZoom: 14 });
+    } else if (ride.starting_location) {
+      map.easeTo({ center: [ride.starting_location[1], ride.starting_location[0]], zoom: Math.max(map.getZoom(), 12.5) });
+    }
+  }
+
+  function renderList() {
+    const date = selectedDate();
+    const rides = sortedRides(date);
+    const body = document.getElementById('list-body');
+    const day = date ? parseLocalDate(date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' }) : '';
+    document.getElementById('list-title').textContent = `${day} · ${rides.length} ride${rides.length === 1 ? '' : 's'}`;
+    body.innerHTML = '';
+    if (!rides.length) {
+      body.innerHTML = `<div class="list-empty">No rides listed for this day${regionFilter === 'all' ? '' : ' in ' + esc(REGION_VIEWS[regionFilter].label)}. Try another day or area.</div>`;
+      return;
+    }
+    for (const ride of rides) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'list-row';
+      const stats = [
+        ride.dist_mi != null ? formatDistance(ride.dist_mi) : '',
+        ride.elev_gain_ft != null ? formatElevation(ride.elev_gain_ft) : '',
+        ride.ride_type ? TYPE_LABELS[ride.ride_type] : '',
+        REGION_VIEWS[ride.region]?.label || '',
+        ride.has_route === false ? 'no route posted' : '',
+      ].filter(Boolean).join(' · ');
+      row.innerHTML = `<span class="list-dot" style="background:${esc(ride.color || '#007bff')}"></span>
+        <span class="list-time">${esc(formatTime12h(ride.date.split(' ')[1]))}</span>
+        <span class="list-main"><div class="list-club">${esc(ride.club_name)}</div><div class="list-title">${esc(ride.title)}</div><div class="list-sub">${esc(stats)}</div></span>`;
+      row.addEventListener('click', () => {
+        if (window.matchMedia('(max-width: 600px)').matches) closeList();
+        ride._select?.();
+        focusRide(ride);
+      });
+      body.appendChild(row);
+    }
+  }
+  function toggleList() { listPanel.classList.contains('open') ? closeList() : (renderList(), listPanel.classList.add('open'), closeMenuPanel()); }
+  function closeList()  { listPanel.classList.remove('open'); }
+  document.getElementById('list-close').addEventListener('click', closeList);
+
+  // Link to the current view: a ride (#ride=<id>) or a day (#day=YYYY-MM-DD). No page reload, no history spam.
+  function setLink(hash) {
+    try { history.replaceState(null, '', hash ? '#' + hash : location.pathname + location.search); } catch {}
+  }
+  const rideLink = ride => location.origin + location.pathname + '#ride=' + encodeURIComponent(ride.id);
+  const rideWhen = ride => parseLocalDate(ride.date.split(' ')[0]).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) + ' ' + formatTime12h(ride.date.split(' ')[1]);
+
+  document.getElementById('sheet-share').addEventListener('click', async () => {
+    if (!selectedRide) return;
+    const url  = rideLink(selectedRide);
+    const text = `${selectedRide.club_name}: ${selectedRide.title}, ${rideWhen(selectedRide)}`;
+    try {
+      if (navigator.share) { await navigator.share({ title: 'Group ride', text, url }); return; }
+      await navigator.clipboard.writeText(`${text}\n${url}`);
+      showRefreshToast('✓ Link copied', 'success');
+    } catch (e) {
+      if (e?.name !== 'AbortError') window.prompt('Copy this link to share the ride:', url);
+    }
+  });
+
+  // -------------------------------
+  // Add to calendar
+  // -------------------------------
+  // Calendar details for a ride. End time = start + distance/pace when both are known, else 2 hours.
+  const pad2 = n => String(n).padStart(2, '0');
+  const localStamp = d => `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}T${pad2(d.getHours())}${pad2(d.getMinutes())}00`;
+  function rideCalendarEvent(r) {
+    const [d, t] = r.date.split(' ');
+    const hours = (r.dist_mi && r.pace_mph) ? Math.max(1, r.dist_mi / r.pace_mph) : 2;
+    // Wall-clock arithmetic only: the ride's own date and time are Mountain time and are written out as such
+    const start = new Date(`${d}T${t}:00`);
+    const end   = new Date(start.getTime() + hours * 3600e3);
+    const stats = [r.dist_mi != null ? r.dist_mi + ' mi' : '', r.elev_gain_ft != null ? r.elev_gain_ft.toLocaleString('en-US') + ' ft climbing' : ''].filter(Boolean).join(', ');
+    return {
+      uid:   `${r.id}@denver-group-rides`,
+      title: `${r.club_name}: ${r.title}`,
+      start: localStamp(start), end: localStamp(end), allDay: false,
+      where: [r.start_name, r.start_address].filter(Boolean).join(', ') || `${r.starting_location[0]}, ${r.starting_location[1]}`,
+      geo:   r.starting_location,
+      url:   r.url || '',
+      details: [stats, r.signup_url ? `${r.signup_label || 'Sign up'}: ${r.signup_url}` : '',
+                'Confirm details on the organizer page: ' + (r.url || ''), 'Map: ' + rideLink(r)].filter(Boolean).join('\n'),
+      file:  r.title,
+    };
+  }
+  // Calendar details for a race or event (all-day; multi-day events span their first to last date).
+  function raceCalendarEvent(race) {
+    const dates = Array.isArray(race.date) ? race.date : [race.date];
+    const last  = parseLocalDate(dates.at(-1));
+    last.setDate(last.getDate() + 1); // all-day end dates are exclusive
+    const stamp = d => `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`;
+    return {
+      uid:   `race-${race.name.replace(/[^a-z0-9]+/gi, '-')}-${dates[0]}@denver-group-rides`,
+      title: race.name, start: stamp(parseLocalDate(dates[0])), end: stamp(last), allDay: true,
+      where: race.location ? race.location + ', CO' : '', geo: [Number(race.latitude), Number(race.longitude)],
+      url:   race.reg_link || race.url || '',
+      details: [(Array.isArray(race.type) ? race.type.join(', ') : race.type) || '', race.reg_link ? 'Register: ' + race.reg_link : '', race.url ? 'Event site: ' + race.url : ''].filter(Boolean).join('\n'),
+      file:  race.name,
+    };
+  }
+  function downloadIcs(ev) {
+    const escIcs = v => String(v ?? '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/([,;])/g, '\\$1');
+    const when = ev.allDay
+      ? [`DTSTART;VALUE=DATE:${ev.start}`, `DTEND;VALUE=DATE:${ev.end}`]
+      : [`DTSTART;TZID=America/Denver:${ev.start}`, `DTEND;TZID=America/Denver:${ev.end}`];
+    const ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Denver Group Rides//EN', 'BEGIN:VEVENT',
+      `UID:${ev.uid}`, `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}Z`, ...when,
+      `SUMMARY:${escIcs(ev.title)}`, ev.where ? `LOCATION:${escIcs(ev.where)}` : '',
+      (ev.geo && isFinite(ev.geo[0]) && isFinite(ev.geo[1])) ? `GEO:${ev.geo[0]};${ev.geo[1]}` : '',
+      `DESCRIPTION:${escIcs(ev.details)}`, /^https?:/i.test(ev.url) ? `URL:${ev.url}` : '',
+      'END:VEVENT', 'END:VCALENDAR'].filter(Boolean).join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([ics], { type: 'text/calendar' }));
+    a.download = (ev.file.replace(/[^a-z0-9]+/gi, '_').slice(0, 50) || 'event') + '.ics';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  function googleCalendarUrl(ev) {
+    const q = new URLSearchParams({ action: 'TEMPLATE', text: ev.title, dates: `${ev.start}/${ev.end}`, details: ev.details, location: ev.where });
+    if (!ev.allDay) q.set('ctz', 'America/Denver');
+    return 'https://calendar.google.com/calendar/render?' + q.toString();
+  }
+
+  // The Add to calendar button opens a two-way choice under the buttons.
+  const calOptions = document.getElementById('sheet-cal-options');
+  const calToggle  = document.getElementById('sheet-ics');
+  function setCalOptions(open) {
+    calOptions.hidden = !open;
+    calToggle.setAttribute('aria-expanded', open);
+    if (open && selectedRide) document.getElementById('sheet-cal-google').href = googleCalendarUrl(rideCalendarEvent(selectedRide));
+  }
+  calToggle.addEventListener('click', () => setCalOptions(calOptions.hidden));
+  document.getElementById('sheet-cal-ics').addEventListener('click', () => {
+    if (selectedRide) downloadIcs(rideCalendarEvent(selectedRide));
+    setCalOptions(false);
+  });
+  document.getElementById('sheet-cal-google').addEventListener('click', () => setTimeout(() => setCalOptions(false), 300));
+
+  document.getElementById('sheet-desc').addEventListener('click', e => e.currentTarget.classList.toggle('expanded'));
+
+  const TYPE_LABELS = { road: 'Road', gravel: 'Gravel', mtb: 'MTB' };
+  // Where you actually join each kind of ride: the organizer's own event page.
+  const SOURCE_ACTIONS = {
+    'Strava':        'Join on Strava',
+    'Meetup':        'RSVP on Meetup',
+    'Ride with GPS': 'Sign up on Ride with GPS',
+  };
+
+  // Start place, description and elevation profile of the open ride card.
+  function renderSheetDetails(ride) {
+    const where = document.getElementById('sheet-where');
+    const place = [ride.start_name, ride.start_address].filter(Boolean).join(' · ');
+    where.textContent = place ? '📍 ' + place : '';
+    where.style.display = place ? '' : 'none';
+
+    const desc = document.getElementById('sheet-desc');
+    desc.classList.remove('expanded');
+    desc.textContent = ride.description || '';
+    desc.style.display = ride.description ? '' : 'none';
+
+    document.getElementById('sheet-directions').href =
+      `https://www.google.com/maps/dir/?api=1&destination=${Number(ride.starting_location[0])},${Number(ride.starting_location[1])}`;
+    renderProfile(ride);
+  }
+
+  // Elevation profile from the route's own altitude points (meters), drawn against distance along the route.
+  function renderProfile(ride) {
+    const wrap = document.getElementById('sheet-profile-wrap');
+    const pts = (ride.route || []).filter(p => p[2] != null);
+    if (pts.length < 20) { wrap.hidden = true; return; }
+    let lo = Infinity, hi = -Infinity, dist = 0;
+    const xs = [0];
+    for (let i = 0; i < pts.length; i++) {
+      lo = Math.min(lo, pts[i][2]); hi = Math.max(hi, pts[i][2]);
+      if (i) { dist += distanceMeters(pts[i - 1], pts[i]); xs.push(dist); }
+    }
+    if (hi - lo < 10 || !dist) { wrap.hidden = true; return; }
+    const W = 300, H = 46;
+    const line = pts.map((p, i) => `${(xs[i] / dist * W).toFixed(1)},${(H - 2 - (p[2] - lo) / (hi - lo) * (H - 6)).toFixed(1)}`).join(' L');
+    const color = esc(ride.color || '#007bff');
+    document.getElementById('sheet-profile').innerHTML =
+      `<path d="M0,${H} L${line} L${W},${H} Z" fill="${color}" fill-opacity="0.15"/><path d="M${line}" fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`;
+    const fmt = m => metricUnits ? Math.round(m).toLocaleString() + ' m' : Math.round(m * 3.28084).toLocaleString() + ' ft';
+    document.getElementById('sheet-profile-min').textContent = 'Low ' + fmt(lo);
+    document.getElementById('sheet-profile-max').textContent = 'High ' + fmt(hi);
+    wrap.hidden = false;
+  }
+
+  document.getElementById('sheet-close').addEventListener('click', closeSheet);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && sheet.classList.contains('open')) closeSheet();
+  });
+
+  // Swipe down anywhere on the card to close.
+  let touchStartY = 0;
+  sheet.addEventListener("touchstart", (e) => {
+    touchStartY = e.touches[0].clientY;
+  }, { passive: true });
+  sheet.addEventListener("touchend", (e) => {
+    const swipeDistance = e.changedTouches[0].clientY - touchStartY;
+    if (swipeDistance > 60) closeSheet(); // 60px downward swipe closes the sheet. Tune the 60 to make it more or less sensitive
+  }, { passive: true });
+
+  // Opening/closing the card can make the browser toolbar move. Re-sync the map once the animation settles.
+  sheet.addEventListener("transitionend", (e) => {
+    if (e.target === sheet && e.propertyName === "transform") syncMapSize();
+  });
+
+  // Populates the shared ride card.
+  function openSheet(ride) {
+    selectedRide = ride;
+    if (activePopup) { activePopup.remove(); activePopup = null; }
+    sheetBar.style.background  = ride.color || "#007bff";
+    sheetClub.textContent      = ride.club_name;
+    sheetTitle.textContent     = ride.title;
+    renderSheetMeta(ride);
+    renderSheetDetails(ride);
+    updateSheetWeather(ride);
+    document.body.classList.add('sheet-open');
+    if (ride.id) setLink('ride=' + encodeURIComponent(ride.id));
+
+    // Wire up the source button
+    sheetBtn.textContent = SOURCE_ACTIONS[ride.source] || `Event page: ${ride.source}`;
+    setCalOptions(false);
+    const signupBtn = document.getElementById('sheet-signup-btn');
+    if (ride.signup_url && /^https?:\/\//i.test(ride.signup_url)) {
+      signupBtn.href = ride.signup_url;
+      signupBtn.textContent = ride.signup_label || 'Sign up';
+      signupBtn.hidden = false;
+    } else {
+      signupBtn.hidden = true;
+      signupBtn.removeAttribute('href');
+    }
+    if (ride.url) { sheetBtn.href = ride.url; sheetBtn.classList.remove("no-url"); }
+    else          { sheetBtn.removeAttribute("href"); sheetBtn.classList.add("no-url"); }
+
+    sheet.inert = false;
+    sheet.classList.add("open");
+    closeMenuPanel();  // don't let the ride sheet and the hamburger panel overlap
+    menuToggleBtn.classList.add("sheet-open");
+    document.querySelector('.maplibregl-ctrl-attrib')?.classList.add('hidden');
+  }
+
+  // Builds the badge chips in the ride card: time | distance + elevation | women-only.
+  // Separate from openSheet so the Metric toggle can refresh the units in place.
+  function renderSheetMeta(ride) {
+    sheetMeta.innerHTML = "";
+    const addBadge = (text, extra = '') => {
+      const b = document.createElement("span");
+      b.className = "sheet-badge" + (extra ? " " + extra : "");
+      b.textContent = text;
+      sheetMeta.appendChild(b);
+    };
+
+    addBadge(formatTime12h(ride.date.split(" ")[1]));
+
+    if (ride.dist_mi != null || ride.elev_gain_ft != null) {
+      if (ride.dist_mi      != null) addBadge(formatDistance(ride.dist_mi));
+      if (ride.elev_gain_ft != null) addBadge('↑ ' + formatElevation(ride.elev_gain_ft));
+    }
+
+    if (ride.women_only) addBadge("Women only", "women");
+    if (ride.ride_type) addBadge(TYPE_LABELS[ride.ride_type]);
+    if (ride.unpaved_pct > 0) addBadge(`${ride.unpaved_pct}% unpaved`);
+    if (ride.pace_mph) addBadge('Pace ' + (metricUnits ? (ride.pace_mph * 1.609344).toFixed(0) + ' km/h' : ride.pace_mph + ' mph'));
+    if (REGION_VIEWS[ride.region]) addBadge(REGION_VIEWS[ride.region].label, 'muted');
+    if (ride.has_route === false) addBadge('No route posted', 'muted');
+  }
+
+  function updateSheetWeather(ride) {
+    const weatherBtn = document.getElementById("sheet-weather-btn");
+    const hasWeather = ENABLE_DETAILED_WEATHER && detailedWeatherKeys.has(ride.title + '|' + ride.date);
+    sheet.classList.toggle('has-weather', hasWeather);
+    if (hasWeather) {
+      weatherBtn.href = 'detailed_weather/?title=' + encodeURIComponent(ride.title) +
+                        '&date=' + encodeURIComponent(ride.date);
+      weatherBtn.style.display = 'block';
+
+      // Hand off this ride's already-fetched route (plus the paved/unpaved
+      // segments already computed for our own map rendering)
+      // to the detailed weather page via **sessionStorage**.
+      // That page requires this handoff to render the routes and the elevation
+      // (see detailed_weather/index.html) and avoids re-fetching
+      // club_rides.json and recomputing everything itself. Keyed by
+      // title+date so the receiving page can confirm it matches before
+      // trusting it.
+      try {
+        sessionStorage.setItem('detailedWeatherRoute', JSON.stringify({
+          title: ride.title,
+          date: ride.date,
+          route: ride.route,
+          segments: buildSegments(ride.route),  // pre-computed segments for surface rendering
+          elev_gain_ft: ride.elev_gain_ft,
+        }));
+      } catch {
+        // Ignore quota/availability errors. Detailed_weather redirects home when this is missing/stale.
+      }
+    } else {
+      weatherBtn.removeAttribute("href");
+      weatherBtn.style.display = 'none';
+    }
+  }
+
+  // Shows detailed weather in an overlay frame so the map page is never unloaded. A normal navigation relies on
+  // the browser's back/forward cache, which it may evict (e.g. under memory pressure), causing a full reload.
+  // A history entry lets the browser/Android Back button close the overlay too.
+  let weatherFrame = null;
+
+  function closeWeatherFrame() {
+    if (!weatherFrame) return;
+    weatherFrame.remove();
+    weatherFrame = null;
+    map.resize();
+  }
+
+  document.getElementById('sheet-weather-btn').addEventListener('click', (e) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    if (weatherFrame) return;
+    history.pushState({ weatherOpen: true }, '');
+    weatherFrame = document.createElement('iframe');
+    weatherFrame.id = 'weather-frame';
+    weatherFrame.title = 'Detailed weather';
+    document.body.appendChild(weatherFrame);
+    weatherFrame.contentWindow.location.replace(e.currentTarget.href); // replace() avoids adding a joint history entry
+  });
+
+  window.addEventListener('message', (e) => {
+    if (e.origin !== location.origin || e.data?.type !== 'close-detailed-weather') return;
+    if (history.state?.weatherOpen) history.back(); // popstate below closes the frame
+    else closeWeatherFrame();
+  });
+
+  window.addEventListener('popstate', closeWeatherFrame);
+
+  // Dismiss the card and clear both selection and hover preview.
+  function closeSheet() {
+    if (sheet.contains(document.activeElement)) map.getCanvas().focus({ preventScroll: true });
+    sheet.inert = true;
+    sheet.classList.remove("open");
+    document.body.classList.remove('sheet-open');
+    if (selectedRide && selectedDate()) setLink('day=' + selectedDate());
+    selectedRide = null;
+    menuToggleBtn.classList.remove("sheet-open");
+    document.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('hidden');
+    if (activePopup) { activePopup.remove(); activePopup = null; }
+    if (restoreAllRoutes) restoreAllRoutes();
+    currentHL = null;
+  }
+
+  // -------------------------------
+  // Surface (paved/unpaved) rendering
+  // -------------------------------
+  // When SHOW_SURFACE is true, routes are drawn with two line styles:
+  //   paved   → solid colored line
+  //   unpaved → dashed colored line over a white base line
+  // Setting this to false draws every route as a single solid line.
+  const SHOW_SURFACE = true;
+
+  // Build a route's draw segments in a single pass over the raw point array.
+  // Each point is [lat, lng, altitude, surface] where surface is 0 'unpaved' or 1 'paved'.
+  // Returns an array of segments: { latlngs: [[lat, lng], ...], surface: 'paved' | 'unpaved' }
+  //
+  // Step 0 — input normalization: ensure every point has a valid surface type.
+  // Only an explicit 0 (unpaved) gets the dashed treatment.
+  // If there is no surface data available (e.g., null), it will be treated as a continuous line.
+  //
+  // Step 1 — smooth: isolated single unpaved points flanked by paved on both
+  // sides are promoted to paved. They can't form a visible dashed line and are
+  // almost certainly GPS misclassifications. Two or more consecutive unpaved
+  // points are left alone as a genuine unpaved stretch.
+  //
+  // Step 2 — single pass (core logic):
+  // We walk through the route point-by-point using spatial proximity detection.
+  // The idea is that on the first unpaved, we discretize the route. Later on, we check if new unpaved
+  // points are close to the route that was already drawn.
+  // We also keep a running distance along the route ("odometer", in meters). Every grid cell
+  // remembers the odometer reading at which it was first drawn.
+  // For each point:
+  //  If it's paved:    → always draw
+  //  If it's unpaved:  → check if its grid cell (~8m resolution) was already drawn
+  //                      AND that happened more than MIN_RETRACE_GAP meters ago along the route
+  //                          → if YES (a real retrace): stop the current segment (prevents overdrawing)
+  //                          → if NO: continue drawing and mark the cells of this edge as drawn
+  // Why the distance check matters:
+  //   When GPS points are spaced about as far apart as the grid cell (SNAP_METERS), the next point
+  //   often lands in a cell that was marked a moment ago by the previous edge. Without the distance
+  //   check that looks like a retrace, so one continuous unpaved stretch is cut into many tiny
+  //   segments. Each tiny segment restarts the dash pattern, and the gaps in the dashed line disappear.
+  //   A cell marked only a few meters back is the road we are riding right now, not a retrace.
+  // This approach:
+  //   Handles different sampling densities
+  //   Handles partial overlaps naturally
+  //   Handles out-and-backs
+  // Important:
+  //   We deduplicate points, which makes the system robust to GPS noise and uneven point spacing.
+
+  // SNAP_METERS defines the resolution of the grid used to detect whether
+  // two GPS points are "close enough" to be considered the same location.
+  // And it's also used to discretize the unpaved segments.
+  const SNAP_METERS = 8;
+  const METERS_PER_DEG = 111111; // grid cell size (m), meters per degree latitude
+
+  // Distance helper: distance between two points in meters.
+  function distanceMeters(a, b) {
+    const R = 6371000; // Earth radius in meters
+    const toRad = d => (d * Math.PI) / 180;
+
+    const dLat = toRad(b[0] - a[0]);
+    const dLng = toRad(b[1] - a[1]);
+
+    const lat1 = toRad(a[0]);
+    const lat2 = toRad(b[0]);
+
+    const x =
+      Math.sin(dLat / 2) ** 2 +
+      Math.sin(dLng / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
+
+    return 2 * R * Math.asin(Math.sqrt(x));
+  }
+
+  // Grid snapping helper: converts lat/lng to a snapped cell coordinate pair.
+  // We don't compare raw GPS coordinates (it could be noisy). Instead, we group nearby
+  // points into the same "cell" so we can reliably detect repeats.
+  function snapCell(lat, lng) {
+    const scale = METERS_PER_DEG / SNAP_METERS;
+    return [
+      Math.round(lat * scale),
+      Math.round(lng * scale),
+    ];
+  }
+
+  // Converts a point into a unique string key for the Map of drawn cells.
+  function pointKey(pt) {
+    return snapCell(pt[0], pt[1]).join(',');
+  }
+
+  // Edge discretization
+  // Instead of marking only endpoint of an unpaved segment, we fill the entire
+  // edge with intermediate grid points.
+  // Without this, return paths or partial overlaps would fail to match.
+  // Each cell is stored together with the distance along the route (in meters) at which
+  // it was first drawn: cumStart is the distance at the start of the edge, edgeLen is the
+  // edge length. If a cell is already in the Map we keep its original (first) distance.
+  function addEdgePoints(a, b, seenUnpavedPoints, cumStart, edgeLen) {
+    const steps = Math.max(1, Math.ceil(edgeLen / SNAP_METERS)); // We use the SNAP_METERS to define the discretization!
+
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+
+      const lat = a[0] + (b[0] - a[0]) * t;
+      const lng = a[1] + (b[1] - a[1]) * t;
+
+      const key = pointKey([lat, lng]);
+      // Keep the FIRST distance at which this cell was drawn (don't overwrite it)
+      if (!seenUnpavedPoints.has(key)) {
+        seenUnpavedPoints.set(key, cumStart + edgeLen * t);
+      }
+    }
+  }
+
+  // Debug helper to visualize snapped cell keys in the console
+  //function snapDebug(pt) {
+  //  const s = snapCell(pt[0], pt[1]);
+  //  return `${s[0]},${s[1]}`;
+  //}
+
+  // ── Step 0 and Step 1 ────────────────────────────────────────────────────────
+  // Normalize + smooth surfaces:
+  function normalizeSurfaces(route) {
+    const surfaces = route.map(p => p[3] === 0 ? 'unpaved' : 'paved'); // Only an explicit 0 (unpaved) gets the dashed treatment. If there is no surface data available (e.g., null), it will be treated as a continuous line.
+
+    // Remove isolated "unpaved" noise
+    return surfaces.map((s, i) => {
+      const prev = surfaces[i - 1] ?? 'paved';
+      const next = surfaces[i + 1] ?? 'paved';
+
+      if (s === 'unpaved' && prev === 'paved' && next === 'paved') {
+        return 'paved';
+      }
+      return s;
+    });
+  }
+
+  // ─── Main builder (single clean pass) ───────────────────────────────────────────
+  // Converts raw GPS points into drawable segments.
+  // Output format:
+  // [
+  //   {
+  //     surface: 'paved' | 'unpaved',
+  //     latlngs: [[lat, lng], ...]
+  //   }
+  // ]
+  //
+  // We scan once, maintain an "active segment", and switch when surface changes.
+  function buildSegments(route) {
+    if (route.length < 2) return []; // A segment requires at least 2 points.
+
+    const surfaces = normalizeSurfaces(route);
+
+    // Grid cells already drawn for unpaved areas.
+    // Key: snapped cell. Value: distance along the route (m) when the cell was first drawn.
+    const seenUnpavedPoints = new Map();
+
+    // Running distance along the whole route (m), like an odometer.
+    // Updated for EVERY edge (paved or unpaved) so distances stay correct along the full route.
+    let cum = 0;
+
+    // A cell counts as "already drawn" only if it was first drawn more than this many meters
+    // earlier along the route. Smaller gaps are just the road we are currently on.
+    const MIN_RETRACE_GAP = 3 * SNAP_METERS;
+
+    const segments = [];
+    let current = null; // active segment
+
+    // Start a new segment
+    function startSegment(surface, startPoint) {
+      current = {
+        surface,
+        latlngs: [startPoint]
+      };
+    }
+
+    // Add a point to the current segment
+    function pushPoint(pt) {
+      current.latlngs.push(pt);
+    }
+
+    // Close current segment if valid
+    function endSegment() {
+      if (current && current.latlngs.length > 1) {
+        segments.push(current);
+      }
+      current = null;
+    }
+
+    // ── Process each edge (prev → curr) ─────────────────────────────
+    for (let i = 1; i < route.length; i++) {
+      const prev = route[i - 1];
+      const curr = route[i];
+      const surface = surfaces[i];
+
+      // Advance the odometer for this edge (before the paved/unpaved branch, so paved edges count too)
+      const edgeLen = distanceMeters(prev, curr); // length of this edge in meters
+      const cumStart = cum;                        // distance along the route at the start of this edge
+      cum += edgeLen;                              // distance along the route at the end of this edge
+
+      // --- PAVED: always draw continuously---
+      if (surface === 'paved') {
+        if (!current || current.surface !== 'paved') {
+          endSegment();
+          startSegment('paved', prev); // ensure continuity
+        }
+        pushPoint(curr);
+        continue;
+      }
+
+      // --- UNPAVED: We only draw if this region hasn't already been covered. ---
+      const key = pointKey(curr);
+      const markedAt = seenUnpavedPoints.get(key); // odometer reading when this cell was first drawn (undefined if never)
+
+      // Retrace = the cell was drawn before AND more than MIN_RETRACE_GAP meters ago along the route.
+      // A cell marked just a few meters back belongs to the road we're on right now, not a retrace.
+      const alreadyDrawn = markedAt !== undefined && (cum - markedAt) > MIN_RETRACE_GAP;
+
+      // Debug: only log unpaved points
+      // Example of output: ✅ NEW | pt: 556720,-1461598 | raw: 40.083850 -105.235180
+      // "pt": The snapped grid cell key (lat/lng converted into discrete spatial bins). Math.round(lat * scale), Math.round(lng * scale)
+      // "raw": The raw GPS coordinates (lat/lng).
+      //if (surface === 'unpaved') {
+      //  console.log(
+      //    alreadyDrawn ? '❌ DUP' : '✅ NEW',
+      //    '| pt:', key,
+      //    '| raw:', curr[0].toFixed(6), curr[1].toFixed(6)
+      //  );
+      //}
+
+      // If this area was already covered (a real retrace), stop current segment
+      if (alreadyDrawn) {
+        // If we're in an unpaved segment, we should CLOSE it at this point
+        // instead of discarding the connection entirely. This fixes closed loops.
+        if (current && current.surface === 'unpaved') {
+          pushPoint(curr);   // include closure point
+        }
+
+        endSegment();
+        continue;
+      }
+
+      // Mark entire edge between prev and curr as covered (with its distance along the route)
+      // to prevent overdrawing nearby points in the future
+      addEdgePoints(prev, curr, seenUnpavedPoints, cumStart, edgeLen);
+
+      // Start new unpaved segment if needed
+      if (!current || current.surface !== 'unpaved') {
+        endSegment();
+        startSegment('unpaved', prev);
+      }
+
+      pushPoint(curr);
+    }
+
+    // Close final segment
+    endSegment();
+
+    return segments;
+  }
+
+  // -------------------------------
+  // Route and race rendering
+  // -------------------------------
+  // Draws routes and race markers for the selected calendar date.
+  // Click/tap selects a ride; desktop hover provides a preview when none is selected.
+  function loadRoutes(date) {
+    closeSheet();
+    closeList();
+	restoreAllRoutes = null; // Stop trying to restore routes from the previous day.
+    rideHitLayerIds.clear();
+
+    // Debug logs to check the selected date and available rides/races (F12 or CTRL+SHIFT+I in browser to open console)
+    //console.log("Selected date:", date);
+    //console.log("Dates with rides:", Object.keys(ridesByDate));
+    //console.log("Dates with races:", Object.keys(racesByDate));
+
+    // Remove old route layers, sources, pin markers and layer event listeners from previous render.
+    // Layer listeners must be removed explicitly: removing a layer does not unregister them.
+    map._routeListeners?.forEach(([type, id, handler]) => map.off(type, id, handler));
+    map._routeListeners = [];
+    map._routeMarkers?.forEach(m => m.remove());
+    map._routeMarkers = [];
+    map._routeLayerIds?.forEach(id => {
+      if (map.getLayer(id))   map.removeLayer(id);
+      if (map.getSource(id))  map.removeSource(id);
+    });
+    map._routeLayerIds  = [];
+
+    // Data for selected date
+    //const routes = (ridesByDate[date] || []).filter(r => r.source === "Strava"); // Filter for debugging purposes: only show Strava routes on the map.
+    //const routes = (ridesByDate[date] || []).filter(r => r.source === "Ride with GPS"); // Filter for debugging purposes: only show Ride with GPS routes on the map.
+    //const routes = (ridesByDate[date] || []).filter(r => r.source === "Ride with GPS" || r.source === "Strava"); // Filter for debugging purposes: show both Strava and Ride with GPS routes on the map.
+    const routes = ridesByDate[date] || [];
+    // Races follow the area filter too (races without a region are always shown)
+    const races  = (racesByDate[date] || []).filter(r => regionFilter === 'all' || !r.region || r.region === regionFilter);
+
+    // Add a checkered pin for each race on this date (reuses _routeMarkers for automatic cleanup on day change)
+    // Multiple races can share the same location — group them by latlng so one pin click highlights all of them.
+    const racesByLocation = {};
+    races.forEach(race => {
+      const key = `${race.latitude},${race.longitude}`;
+      if (!racesByLocation[key]) racesByLocation[key] = [];
+      racesByLocation[key].push(race.name);
+    });
+
+    // Tracks checkered race pins so highlightRoute/restoreAllRoutes can dim/restore them
+    const raceMarkers = [];
+
+    Object.entries(racesByLocation).forEach(([latlng, names]) => {
+      const [lat, lng] = latlng.split(",").map(Number);
+      const marker = createPinMarker([lng, lat], null, true);
+      marker.getElement().addEventListener('click', () => {
+        document.getElementById('races-page').classList.add('open');
+        loadRaces();
+        // Wait one frame for loadRaces() to finish rendering the cards before highlighting
+        requestAnimationFrame(() => {
+          names.forEach(name => {
+            const card = document.querySelector(`.race-entry[data-race-name="${CSS.escape(name)}"]`);
+            if (card) card.classList.add('highlighted');
+          });
+          // Scroll the first highlighted card into view
+          const first = document.querySelector('.race-entry.highlighted');
+          if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+      });
+      const addedMarker = marker.addTo(map);
+      map._routeMarkers.push(addedMarker);
+      raceMarkers.push(addedMarker);
+    });
+
+    if (!routes.length && !races.length) {
+      map.jumpTo({ center: [DEFAULT_CENTER[1], DEFAULT_CENTER[0]], zoom: DEFAULT_ZOOM });
+      updateWeather(date); // Update weather for the selected date, even if there are no rides or races
+      return;
+    }
+
+    // Offset overlapping start markers
+    // When two or more rides share the same starting point, spread their pins
+    // in a small circle (~50–70 m radius) so they are all individually tappable.
+    // This is useful if there are two or more rides with the same starting point.
+    const startKey = r => `${r.starting_location[0].toFixed(5)},${r.starting_location[1].toFixed(5)}`;
+    const startGroups = {};
+    routes.forEach(ride => {
+      const key = startKey(ride);
+      if (!startGroups[key]) startGroups[key] = [];
+      startGroups[key].push(ride);
+    });
+
+    Object.values(startGroups).forEach(group => {
+      if (group.length <= 1) return;
+      // Offset around ~50-70 m for starting markers that share the same starting location on the same day
+      const radiusLat = 0.0005;
+      const radiusLng = 0.0007;
+      // Circular offset approach:
+      group.forEach((ride, i) => {
+        const angle = (2 * Math.PI * i) / group.length;
+        ride._offset_start = [
+          ride.starting_location[0] + Math.cos(angle) * radiusLat,
+          ride.starting_location[1] + Math.sin(angle) * radiusLng,
+        ];
+      });
+    });
+
+    // Color palettes (cycles if more than 8)
+    const colors = ['blue', 'red', 'green', 'black', 'magenta', 'brown', '#ff7f0e', 'teal'];
+    // Purple shades for women-only rides (cycles if more than 3)
+    const womenColors = ['#6F42C1 ', '#AB47BC', '#8A63D2'];
+    let womenIdx = 0;
+    let regularIdx = 0;
+
+    // Layer ID utilities
+    // Each polyline segment gets its own GeoJSON source + line layer, identified
+    // by a unique string that is safe to use within a single loadRoutes call.
+    let _seq = 0;
+    const nextLayerId = () => `route-${Date.now()}-${_seq++}`;
+
+    // Direction arrows
+    // Settings for the arrows shown on the highlighted route.
+    const ROUTE_ARROW_SPACING = 150;  // Longitudinal distance between arrows (pixels)
+    const ROUTE_ARROW_SIZE    = 0.7;  // Arrow size relative to the line width. This controls the arrow and the rectangle
+
+    // allVisibleLayers: used by highlight/restore helpers to iterate over every drawn route
+    const allVisibleLayers = [];
+    let hoveredHitId = null; // tracks the currently hovered hit layer (desktop only)
+
+    // applyStyles
+    // Applies an array of paint-property changes in a single GPU repaint.
+    // Uses map.style.batch() for zero visible delay when highlighting many layers at once.
+    // Falls back to sequential setPaintProperty on older builds where this is not available.
+    function applyStyles(changes) {
+      const apply = () => changes.forEach(({ id, prop, value }) => {
+        if (prop === 'visibility') {
+          map.setLayoutProperty(id, prop, value, { validate: false });
+          return;
+        }
+        // Kill the default MapLibre paint transition (~300ms) before each change so
+        // highlights and dims are instant with zero visible lag.
+        map.setPaintProperty(id, prop + '-transition', { duration: 0, delay: 0 }, { validate: false });
+        map.setPaintProperty(id, prop, value, { validate: false });
+      });
+      changes = changes.filter(c => c.id); // rides without a route have no line/arrow layers
+      typeof map.style.batch === 'function' ? map.style.batch(apply) : apply();
+    }
+
+    // highlightRoute / restoreAllRoutes
+    // Thickens and fully saturates one route while dimming all others to gray.
+    function highlightRoute(activeSegmentLines) {
+      const changes = [];
+      allVisibleLayers.forEach(l => {
+        const isActive = l.segmentLines === activeSegmentLines;
+        if (isActive) {
+          // Bring this route's layers to the very top of the stack so it draws
+          // over every other route where paths overlap (white base → line → arrow).
+          l.whitelines.forEach(id => map.moveLayer(id));
+          l.segmentLines.forEach(id => map.moveLayer(id));
+          if (l.arrowLayer) map.moveLayer(l.arrowLayer);
+
+          // Active route: thicker and fully opaque, keep its own color
+          l.segmentLines.forEach(id => {
+            changes.push({ id, prop: 'line-color',   value: l.color });
+            changes.push({ id, prop: 'line-width',   value: l.isMobile ? 6 : 5.5 }); // Make the active route thicker than the default (5 on mobile, 4 on desktop) to make it stand out more
+            changes.push({ id, prop: 'line-opacity', value: 1 });
+          });
+          // Restore white base lines so unpaved dashes look correct on the highlighted route
+          l.whitelines.forEach(id => changes.push({ id, prop: 'line-opacity', value: 1 }));
+          // Direction arrows. Show for active route
+          changes.push({
+            id: l.arrowLayer,
+            prop: 'visibility',
+            value: 'visible'
+          });
+          // Bring this route's pin above every other pin
+          l.marker.getElement().style.zIndex = 3;
+        } else {
+          // Inactive routes: thin gray so the active one stands out
+          l.segmentLines.forEach(id => {
+            changes.push({ id, prop: 'line-color',   value: 'gray' });
+            changes.push({ id, prop: 'line-width',   value: 3 });
+            changes.push({ id, prop: 'line-opacity', value: 0.5 });
+          });
+          // Hide white base lines on inactive unpaved segments
+          l.whitelines.forEach(id => changes.push({ id, prop: 'line-opacity', value: 0 }));
+          // Direction arrows. Hide for inactive routes
+          changes.push({
+            id: l.arrowLayer,
+            prop: 'visibility',
+            value: 'none'
+          });
+          // Grayscale colored pins; plain opacity-dim for black pins
+          const filter = l.color !== 'black' ? 'grayscale(1) opacity(0.5)' : 'opacity(0.4)';
+          l.marker.getElement()?.style.setProperty('filter', filter);
+          l.marker.getElement().style.zIndex = 1; // send inactive pins behind the highlighted one
+        }
+      });
+      // Dim checkered race pins when any route is highlighted
+      raceMarkers.forEach(m => {
+        m.getElement()?.style.setProperty('filter', 'grayscale(1) opacity(0.5)');
+        m.getElement().style.zIndex = 1;
+      });
+      applyStyles(changes);
+    }
+
+    // Restore all routes to their default (unselected) style.
+    restoreAllRoutes = () => {
+      // Undo the z-order change from highlightRoute(): re-apply moveLayer()
+      // in original draw order so overlapping routes go back to stacking
+      // the way they did before any route was highlighted.
+      allVisibleLayers.forEach(l => {
+        l.whitelines.forEach(id => map.moveLayer(id));
+        l.segmentLines.forEach(id => map.moveLayer(id));
+        if (l.arrowLayer) map.moveLayer(l.arrowLayer);
+      });
+
+      const changes = [];
+      allVisibleLayers.forEach(l => {
+        l.segmentLines.forEach(id => {
+          changes.push({ id, prop: 'line-color',   value: l.color });
+          changes.push({ id, prop: 'line-width',   value: l.isMobile ? 5 : 4 });
+          changes.push({ id, prop: 'line-opacity', value: l.isMobile ? 0.85 : 0.8 });
+        });
+        // Restore white base lines under unpaved segments
+        l.whitelines.forEach(id => changes.push({ id, prop: 'line-opacity', value: 1 }));
+        // Direction arrows. Hide when no route is selected
+        changes.push({
+          id: l.arrowLayer,
+          prop: 'visibility',
+          value: 'none'
+        });
+        // Restore pin marker color and opacity
+        l.marker.getElement()?.style.removeProperty('filter');
+        l.marker.getElement().style.zIndex = '';
+      });
+      // Restore checkered race pins
+      raceMarkers.forEach(m => {
+        m.getElement()?.style.removeProperty('filter');
+        m.getElement().style.zIndex = '';
+      });
+      applyStyles(changes);
+    }
+
+    // Direction arrows. Add arrow layer
+    // Creates one directional-arrow layer for a route.
+    // The coordinates are kept in their original GPS order.
+    // MapLibre therefore knows which way the route is travelling
+    // and automatically rotates each arrow to follow that direction.
+    function addDirectionArrowLayer(allLatLngs, color) {
+      // Called once per route when its day is loaded (not on click).
+
+      const sourceId = nextLayerId();
+      const layerId  = nextLayerId();
+
+      map.addSource(sourceId, {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          geometry: {
+            type: 'LineString',
+            coordinates: allLatLngs.map(([lat, lng]) => [lng, lat])
+          }
+        }
+      });
+
+      map.addLayer({
+        id: layerId,
+        type: 'symbol',
+        source: sourceId,
+
+        layout: {
+          // Repeat the arrow along the entire route.
+          'symbol-placement': 'line',
+          'symbol-spacing': ROUTE_ARROW_SPACING,
+
+          // Use this route's own colored arrow image.
+          'icon-image': getArrowImageId(color),
+          'icon-size': ROUTE_ARROW_SIZE,
+
+          // Keep arrows visible even when routes overlap.
+          'icon-allow-overlap': true,
+          'icon-ignore-placement': true,
+
+          // Rotate the arrow to follow the route.
+          'icon-rotation-alignment': 'map',
+          'icon-pitch-alignment': 'map',
+
+          // Arrows are hidden until this route is highlighted.
+          'visibility': 'none'
+        },
+
+        paint: {
+          'icon-opacity': 1
+        }
+      });
+
+      map._routeLayerIds.push(sourceId, layerId);
+
+      return layerId;
+    }
+
+    // Per-ride rendering
+    // Rides whose organizer posted no route: a start pin only (same card, list and sharing as any other ride).
+    function addPinOnlyRide(ride) {
+      if (!ride.starting_location) return;
+      const color = ride.women_only
+        ? womenColors[womenIdx++ % womenColors.length]
+        : colors[regularIdx++ % colors.length];
+      ride.color = color;
+      const start    = ride._offset_start || ride.starting_location;
+      const markerEl = createPinMarker([start[1], start[0]], color).addTo(map);
+      map._routeMarkers.push(markerEl);
+      const segmentLines = [];
+      allVisibleLayers.push({ segmentLines, whitelines: [], arrowLayer: null, marker: markerEl, color, isMobile: isTouchDevice });
+      const selectRide = () => {
+        restoreAllRoutes();
+        highlightRoute(segmentLines);
+        currentHL = segmentLines;
+        openSheet(ride);
+      };
+      ride._select = selectRide;
+      const el = markerEl.getElement();
+      el.addEventListener('click', e => { e.stopPropagation(); selectRide(); });
+      if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+        el.addEventListener('mouseenter', () => {
+          if (currentHL) return;
+          highlightRoute(segmentLines);
+          if (activePopup) activePopup.remove();
+          activePopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, className: 'ride-tooltip', maxWidth: 'none' })
+            .setLngLat(markerEl.getLngLat()).setHTML(buildTooltipHTML(ride, formatTime12h(ride.date.split(" ")[1]))).addTo(map);
+        });
+        el.addEventListener('mouseleave', () => {
+          if (currentHL) return;
+          restoreAllRoutes();
+          if (activePopup) { activePopup.remove(); activePopup = null; }
+        });
+      }
+    }
+
+    routes.forEach(ride => {
+      if (!ride.route?.length) { addPinOnlyRide(ride); return; }
+
+      const color = ride.women_only
+        ? womenColors[womenIdx++ % womenColors.length]
+        : colors[regularIdx++ % colors.length];
+      ride.color = color; // stored so openSheet can access it
+
+      const allLatLngs = ride.route.map(pt => [pt[0], pt[1]]);
+      const start      = ride._offset_start || ride.starting_location || allLatLngs[0];
+      const rideTime   = formatTime12h(ride.date.split(" ")[1]);
+
+      // Direction arrows. Created after this route's line layers below so the
+      // arrow layer renders on top instead of underneath the route.
+      let arrowLayer;
+
+      // buildVisibleLines
+      // One source per ride and 3 fixed layers per ride using filter expressions:
+      //   1. paved solid line
+      //   2. unpaved white base line (prevents dashes merging on overlapping routes)
+      //   3. unpaved dashed colored line on top
+      // @returns {{ segmentLines: string[], whitelines: string[] }}
+      function buildVisibleLines(lineColor, weight, opacity) {
+        const toML = latlngs => latlngs.map(([lat, lng]) => [lng, lat]);
+        const sourceId = nextLayerId();
+
+        if (!SHOW_SURFACE) {
+          // Single source + single layer for the whole route
+          map.addSource(sourceId, {
+            type: 'geojson',
+            data: { type: 'Feature', geometry: { type: 'LineString', coordinates: toML(allLatLngs) } }
+          });
+          const layerId = nextLayerId();
+          map.addLayer({
+            id: layerId, type: 'line', source: sourceId,
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: { 'line-color': lineColor, 'line-width': weight, 'line-opacity': opacity }
+          });
+          map._routeLayerIds.push(sourceId, layerId);
+          return { segmentLines: [layerId], whitelines: [] };
+        }
+
+        // Build one FeatureCollection with all segments tagged by surface type.
+        // This is a single addSource call regardless of how many segments there are in a route.
+        const segments = buildSegments(ride.route);
+        const features = segments.map(seg => ({
+          type: 'Feature',
+          properties: { surface: seg.surface },
+          geometry: { type: 'LineString', coordinates: toML(seg.latlngs) }
+        }));
+
+        map.addSource(sourceId, {
+          type: 'geojson',
+          data: { type: 'FeatureCollection', features }
+        });
+
+        // Layer 1: paved solid line (filter: surface === 'paved')
+        const pavedId = nextLayerId();
+        map.addLayer({
+          id: pavedId, type: 'line', source: sourceId,
+          filter: ['==', ['get', 'surface'], 'paved'],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': lineColor, 'line-width': weight, 'line-opacity': opacity }
+        });
+        map._routeLayerIds.push(pavedId);
+
+        // Layer 2: unpaved white base line. Drawn first so colored dashes sit on top.
+        // Prevents dashes from merging into a solid line on overlapping routes.
+        const whiteId = nextLayerId();
+        map.addLayer({
+          id: whiteId, type: 'line', source: sourceId,
+          filter: ['==', ['get', 'surface'], 'unpaved'],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': 'white', 'line-width': weight, 'line-opacity': 1 }
+        });
+        map._routeLayerIds.push(whiteId);
+
+        // Layer 3: unpaved dashed colored line on top of white base
+        const dashedId = nextLayerId();
+        map.addLayer({
+          id: dashedId, type: 'line', source: sourceId,
+          filter: ['==', ['get', 'surface'], 'unpaved'],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: {
+            'line-color': lineColor,
+            'line-width': weight,
+            'line-opacity': opacity,
+            'line-dasharray': [2 / weight, 6 / weight]
+          }
+        });
+        map._routeLayerIds.push(dashedId);
+
+        return { segmentLines: [pavedId, dashedId], whitelines: [whiteId] };
+      }
+
+      // Hit area
+      // A wide transparent line layer placed over the route for easier
+      // clicking/tapping (finger-friendly on mobile, cursor-friendly on desktop).
+      function addHitLayer(hitWidth) {
+        const hitCoords = allLatLngs.map(([lat, lng]) => [lng, lat]);
+        const hitId = nextLayerId();
+        map.addSource(hitId, {
+          type: 'geojson',
+          data: { type: 'Feature', geometry: { type: 'LineString', coordinates: hitCoords } }
+        });
+        map.addLayer({ id: hitId, type: 'line', source: hitId,
+          paint: { 'line-color': 'transparent', 'line-width': hitWidth, 'line-opacity': 0 }
+        });
+        map._routeLayerIds.push(hitId);
+        rideHitLayerIds.add(hitId);
+        return hitId;
+      }
+
+      const { segmentLines, whitelines } = buildVisibleLines(color, isTouchDevice ? 5 : 4, isTouchDevice ? 0.85 : 0.8);
+      const hitId        = addHitLayer(isTouchDevice ? 25 : 20);
+      arrowLayer         = addDirectionArrowLayer(allLatLngs, color); // added last so it renders on top
+      const markerEl     = createPinMarker([start[1], start[0]], color).addTo(map);
+      map._routeMarkers.push(markerEl);
+      allVisibleLayers.push({ segmentLines, whitelines, arrowLayer, marker: markerEl, color, isMobile: isTouchDevice });
+
+      const selectRide = () => {
+        restoreAllRoutes();
+        highlightRoute(segmentLines);
+        currentHL = segmentLines;
+        openSheet(ride);
+      };
+      ride._select = selectRide; // lets the day list and shared links open this ride
+
+      // Registers a listener on this ride's hit layer and tracks it so the next loadRoutes() can remove it.
+      const onHitLayer = (type, handler) => {
+        map.on(type, hitId, handler);
+        map._routeListeners.push([type, hitId, handler]);
+      };
+
+      onHitLayer('click', e => {
+        const hits = map.queryRenderedFeatures(e.point, { layers: [...rideHitLayerIds] });
+        if (hits[0]?.layer.id === hitId) selectRide();
+      });
+      markerEl.getElement().addEventListener('click', e => { e.stopPropagation(); selectRide(); });
+
+      if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+        // Opens a popup anchored to the cursor position. The HTML is built on each call
+        // so it always reflects the current Metric/Imperial setting.
+        function showPopup(lngLat) {
+          if (activePopup) activePopup.remove();
+          activePopup = new maplibregl.Popup({
+            closeButton: false, closeOnClick: false,
+            className: 'ride-tooltip', maxWidth: 'none'
+          }).setLngLat(lngLat).setHTML(buildTooltipHTML(ride, rideTime)).addTo(map);
+        }
+
+        onHitLayer('mouseenter', e => {
+          hoveredHitId = hitId;
+          map.getCanvas().style.cursor = 'pointer';
+          if (currentHL) return;
+          highlightRoute(segmentLines);
+          showPopup(e.lngLat);
+        });
+        onHitLayer('mousemove', e => {
+          if (!currentHL && hoveredHitId === hitId) activePopup?.setLngLat(e.lngLat);
+        });
+        onHitLayer('mouseleave', () => {
+          // Guard: only restore if the mouse hasn't already entered a different route
+          // (mouseenter on the new route fires before mouseleave on the old one)
+          if (hoveredHitId === hitId) {
+            hoveredHitId = null;
+            map.getCanvas().style.cursor = '';
+            if (!currentHL) restoreAllRoutes();
+            if (activePopup) { activePopup.remove(); activePopup = null; }
+          }
+        });
+        // Marker hover/click mirrors the hit-layer behaviour
+        markerEl.getElement().addEventListener('mouseenter', () => {
+          if (!currentHL && !hoveredHitId) {
+            highlightRoute(segmentLines);
+            showPopup(markerEl.getLngLat());
+          }
+        });
+        markerEl.getElement().addEventListener('mouseleave', () => {
+          if (!currentHL && !hoveredHitId) {
+            restoreAllRoutes();
+            if (activePopup) { activePopup.remove(); activePopup = null; }
+          }
+        });
+      }
+    });
+
+    // Fit map to routes + races
+    // Compute the bounding box of all route coordinates as well as races and zoom to fit with 5% padding.
+    let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity;
+
+    // Routes
+    routes.forEach(ride => {
+      if (!ride.route?.length && ride.starting_location) {
+        const [lat, lng] = ride.starting_location;
+        if (lng < minLng) minLng = lng;
+        if (lng > maxLng) maxLng = lng;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      }
+      ride.route?.forEach(pt => {
+        const lat = pt[0];
+        const lng = pt[1];
+
+        if (lng < minLng) minLng = lng;
+        if (lng > maxLng) maxLng = lng;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      });
+    });
+
+    // Races
+    // Races only shape the map view on days without rides, so a far-away race does not zoom the map out
+    (routes.length ? [] : races).forEach(race => {
+      const lat = Number(race.latitude);
+      const lng = Number(race.longitude);
+
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    });
+
+    if (minLng !== Infinity) {
+      const mapEl = document.getElementById('map');
+      const padX  = Math.round(mapEl.clientWidth  * 0.05);
+      const padY  = Math.round(mapEl.clientHeight * 0.05);
+      const bannerPad = (window._bannerHeightPx || 0) + padY;  // If a banner is active, add its height to the top padding so routes are fitted into the visible area below the banner, not hidden underneath it.
+      map.fitBounds(
+        [[minLng, minLat], [maxLng, maxLat]], // [[west, south], [east, north]]
+        { padding: { top: bannerPad + 24, bottom: padY + 64, left: padX + 16, right: padX + 16 }, maxZoom: 13 } // extra room for pins, the area chips and the menu button
+      );
+    }
+  }
+
+  // Desktop tooltip HTML builder
+  // Returns the inner HTML for the desktop hover popup.
+  // Kept as a separate function to avoid cluttering the per-ride loop.
+  function buildTooltipHTML(ride, rideTime) {
+    const badge = (text, extra = '') =>
+      `<span style="background:${extra ? '#f3f0ff' : '#f0f6ff'}; color:${extra ? '#6f42c1' : '#007bff'}; border:1px solid ${extra ? '#d0c4f7' : '#cce0ff'}; border-radius:20px; padding:4px 12px; font-size:1.2em; font-weight:600;">${text}</span>`;
+
+    const distElev = [
+      ride.dist_mi        != null ? `Distance: ${formatDistance(ride.dist_mi)}`           : '',
+      ride.elev_gain_ft   != null ? `Elev Gain: ${formatElevation(ride.elev_gain_ft)}`    : '',
+    ].filter(Boolean).join(' | ');
+
+    return `
+      <div style="font-size:1.6em; font-weight:700; text-transform:uppercase; color:#111; line-height:1.3; margin-bottom:6px;">${esc(ride.club_name)}</div>
+      <div style="font-size:1.4em; color:#888; margin-bottom:12px;">${esc(ride.title)}</div>
+      <div style="display:flex; gap:6px; flex-wrap:wrap;">
+        ${badge(rideTime)}
+        ${distElev ? badge(distElev) : ''}
+        ${ride.women_only ? badge('Women only', 'women') : ''}
+        ${ride.ride_type ? badge(TYPE_LABELS[ride.ride_type]) : ''}
+        ${ride.has_route === false ? badge('No route posted') : ''}
+      </div>`;
+  }
+
+  // -------------------------------
+  // Load races & render Races page
+  // -------------------------------
+  // Renders the Races page list from the already-loaded allRaces array, kept fresh by the visibility refresh.
+  window.loadRaces = function loadRaces() { // window.loadRaces in the global scope so it can be called from the button click
+    const container = document.getElementById("races-content");
+    if (!container) return;
+    loadDeferredImages(document.getElementById('races-page'));
+
+    // Remove only previously-rendered race entries and their separators
+    container.querySelectorAll(".race-entry, hr:not(.static)").forEach(el => el.remove());
+
+    // Get today's date for filtering. Avoid showing past races
+    const today = new Date();
+    today.setHours(0,0,0,0);
+
+    // Filter races to include only upcoming events
+    const upcoming = allRaces.filter(race => {
+      // Normalize date field into an array
+      // Some races have a single date, others multiple dates
+      const dates = Array.isArray(race.date)
+        ? race.date
+        : [race.date];
+
+      // Keep race if ANY race date is today or later
+      return dates.some(d => parseLocalDate(d) >= today);
+    });
+
+    // Show fallback message if no upcoming races exist
+    if (!upcoming.length) {
+      const empty = document.createElement("p");
+
+      empty.className = "race-entry";
+      empty.style.fontWeight = "600";
+      empty.textContent = "No races found.";
+
+      container.appendChild(empty);
+      return;
+    }
+
+    // Build and append a card for each race
+    upcoming.forEach(race => {
+      container.appendChild(buildRaceCard(race));
+      const hr = document.createElement('hr');
+      container.appendChild(hr);
+    });
+
+    // Show BikeReg attribution after races load
+    document.getElementById("bikereg-attribution").style.display = "block";
+  };
+
+  // -------------------------------
+  // Convert YYYY-MM-DD string into local Date object
+  // -------------------------------
+  function parseLocalDate(str) {
+    // Split string into numeric year/month/day parts
+    const [y, m, d] = str.split("-").map(Number);
+
+    // Month is zero-indexed in JavaScript Date
+    return new Date(y, m - 1, d);
+  }
+
+  // -------------------------------
+  // Format date for display
+  // Example:
+  // 2026-05-06 -> May 6, 2026
+  // -------------------------------
+  function formatDate(dateStr) {
+    return parseLocalDate(dateStr).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric"
+    });
+  }
+
+  // -------------------------------
+  // Build a single race card element
+  // -------------------------------
+  function buildRaceCard(race) {
+    // Normalize race dates into array
+    const dates = Array.isArray(race.date)
+      ? race.date
+      : [race.date];
+
+    // Build date display text
+    // Single-day race:
+    //   May 6, 2026
+    //
+    // Multi-day race:
+    //   May 6, 2026 – May 8, 2026
+    const dateText = dates.length === 1
+      ? formatDate(dates[0])
+      : `${formatDate(dates[0])} – ${formatDate(dates.at(-1))}`;
+
+    // Generate Google Maps search link
+    const mapsLink =
+      `https://www.google.com/maps?q=${Number(race.latitude)},${Number(race.longitude)}`;
+
+    // Create race wrapper element
+    const div = document.createElement("div");
+
+    // Used later for cleanup and highlight matching
+    div.className = "race-entry";
+    div.dataset.raceName = race.name;
+
+    // Build race card HTML
+    div.innerHTML = `
+      <!-- Race name -->
+      <p style="margin:0; font-weight:600;">
+        <a href="${safeUrl(race.url || race.reg_link)}" target="_blank" rel="noopener noreferrer">
+          ${esc(race.name)}
+        </a>
+      </p>
+
+      <!-- Race type/categories -->
+      <p style="margin:0 0 4px; font-size:0.7em; color:#888;">
+        ${esc(Array.isArray(race.type)
+          ? race.type.join(", ")
+          : race.type || "Unknown")}
+      </p>
+
+      <div style="margin-left:12px;">
+
+        <!-- Race date -->
+        <p style="margin:0 0 6px; font-weight:600;">
+          📅 ${dateText}
+        </p>
+
+        <!-- Race location -->
+        <p style="margin:0 0 4px; font-size:0.9em;">
+          📍
+          <a href="${mapsLink}" target="_blank" rel="noopener noreferrer">
+            ${esc(race.location)}
+          </a>
+        </p>
+
+        <!-- Sign up + add to calendar -->
+        <div class="race-actions">
+          ${race.reg_link ? `<a class="primary" href="${safeUrl(race.reg_link)}" target="_blank" rel="noopener noreferrer">Register</a>` : ''}
+          <button type="button" class="race-ics">Add to calendar</button>
+          <a class="race-gcal" target="_blank" rel="noopener noreferrer">Google Calendar</a>
+        </div>
+      </div>
+
+    `;
+
+    div.querySelector('.race-ics').addEventListener('click', () => downloadIcs(raceCalendarEvent(race)));
+    div.querySelector('.race-gcal').href = googleCalendarUrl(raceCalendarEvent(race));
+
+    // Return completed race card element
+    return div;
+  }
+
+  // -------------------------------
+  // Generate 7-day calendar
+  // -------------------------------
+  // Local date string in YYYY-MM-DD format using local timezone for comparison with ride and races dates
+  function formatLocalDate(date) {
+  return date.getFullYear() + "-" +
+         String(date.getMonth() + 1).padStart(2,'0') + "-" +
+         String(date.getDate()).padStart(2,'0');
+  }
+
+  // Builds the 7-day calendar strip, then auto-selects the first day with rides or races.
+  function generateCalendar() {
+    const calendarDiv = document.getElementById("calendar");
+    const today       = new Date();
+
+    // Shared link? #ride=<id> opens that ride, #day=YYYY-MM-DD opens that day.
+    const link     = new URLSearchParams(location.hash.slice(1));
+    const linkRide = link.get('ride') ? allRides.find(r => r.id === link.get('ride')) : null;
+    const linkDate = linkRide ? linkRide.date.split(' ')[0] : link.get('day');
+    if (linkRide && regionFilter !== 'all' && (linkRide.region || 'denver') !== regionFilter) {
+      regionFilter = 'all';               // make sure the shared ride is not filtered out
+      ridesByDate  = groupRides(allRides);
+    }
+    // A remembered area with nothing in it this week would look like an empty site: show everything instead.
+    if (regionFilter !== 'all' && !Object.keys(ridesByDate).length && allRides.length) {
+      regionFilter = 'all';
+      ridesByDate  = groupRides(allRides);
+    }
+    let linkCol = null;
+    const WEEKDAYS    = ["SUN","MON","TUE","WED","THU","FRI","SAT"];
+    let firstRideDate = null;
+    let firstRideCol = null;
+
+    for (let i = 0; i < 7; i++) { // We can easily change this to show more days if desired. Currently: 7
+      const date    = new Date(today);
+      date.setDate(today.getDate() + i);
+      const isoDate = formatLocalDate(date);
+      const rides   = ridesByDate[isoDate] || [];
+      const races   = racesByDate[isoDate] || [];
+
+      const col     = document.createElement("div");
+      col.className = "day-column" + ((rides.length || races.length) ? " ride-day" : "");
+      col.dataset.date = isoDate;
+
+      // Day-name label (e.g. "MON")
+      const nameDiv = document.createElement("div");
+      nameDiv.className = "day-name";
+      nameDiv.innerText = WEEKDAYS[date.getDay()];
+
+      // Date label (e.g. "(Apr 14)")
+      const dateDiv = document.createElement("div");
+      dateDiv.className = "day-date";
+      dateDiv.innerText = date.getDate();
+      col.title = date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+      col.append(nameDiv, dateDiv);
+      col.setAttribute('role', 'button');
+      col.tabIndex = 0;
+      col.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); col.click(); } };
+      col.onclick = () => {
+        document.querySelectorAll('.day-column').forEach(el => el.classList.remove('selected'));
+        col.classList.add('selected');
+        setLink('day=' + isoDate);
+        loadRoutes(isoDate);
+        renderAreaBar(); // For a given day, this re-calls loadRoutes() and buildSegments() that includes the paved/unpaved logic. But it's a very fast operation (small dataset).
+        updateWeather(isoDate);
+      };
+
+      if (!firstRideDate && (rides.length || races.length)) {
+        firstRideDate = isoDate;
+        firstRideCol  = col;
+      }
+      if (isoDate === linkDate) linkCol = col;
+
+      calendarDiv.appendChild(col);
+    }
+
+    // Open the shared day if the link names one; otherwise auto-select the first day that has rides,
+    // or fall back to the default map view
+    if (linkCol) { firstRideCol = linkCol; firstRideDate = linkDate; }
+    if (firstRideDate) {
+      firstRideCol.classList.add('selected');
+      loadRoutes(firstRideDate);
+      updateWeather(firstRideDate);
+    } else {
+      // Nothing listed this week: select today so the weather, chips and list still make sense
+      const todayCol = calendarDiv.querySelector('.day-column');
+      todayCol?.classList.add('selected');
+      if (todayCol) updateWeather(todayCol.dataset.date);
+      map.jumpTo({ center: [DEFAULT_CENTER[1], DEFAULT_CENTER[0]], zoom: DEFAULT_ZOOM });
+    }
+    refreshDayColumns();
+    renderAreaBar();
+
+    if (link.get('ride')) {
+      if (linkRide && linkCol) {
+        linkRide._select?.();
+        focusRide(linkRide);
+      } else {
+        showRefreshToast('That ride is no longer listed', 'error');
+        setLink('');
+      }
+    }
+  }
+
+})();
+</script>
+
+<!-- Service Worker (cache vector tiles) -->
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js')
+      .then(() => console.log('Service Worker registered'))
+      .catch(err => console.error('Service Worker registration failed:', err));
+  });
+}
+</script>
+
+<!-- No analytics: this site does not track visitors. -->
+</body>
+</html>
